@@ -1,3 +1,11 @@
+"""
+title: OpenWebUI Semantic Memory
+author: mtayfur
+author_url: https://github.com/mtayfur/openwebui-semantic-memory
+version: 1.0.0
+license: GPL-3.0
+"""
+
 import re
 import asyncio
 import logging
