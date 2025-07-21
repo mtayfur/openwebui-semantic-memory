@@ -292,49 +292,43 @@ class Tools:
         __event_emitter__: Optional[Any] = None,
     ) -> dict:
         """
-        Store only critical, stable, and significant facts worth remembering. Be extremely selective—reject any temporary, subjective, or speculative information. Always split complex information into single, atomic facts.
+        Store ONLY critical, stable, and significant PERSONAL facts about the user. Be extremely selective—reject temporary, subjective, speculative, or general content. Split complex information into atomic facts.
 
         Args:
-            input_data (List[str]): List of atomic memory strings to store. Each MUST be a single, distinct, indivisible fact in English. REQUIRED.
-            __user__ (Optional[dict], optional): User context provided automatically by the system.
-            __event_emitter__ (Optional[Callable], optional): Callback for status updates.
+            input_data (List[str]): Atomic memory strings. Each MUST be a single, indivisible PERSONAL fact about the user. REQUIRED.
+
+        TRANSLATION REQUIREMENT:
+            The user's input, regardless of language, MUST be translated into a concise, factual English atomic statement before storing.
 
         Returns:
-            dict: JSON response with summary counts (added, updated, skipped), actions performed, and current date. If no valid input, returns a JSON error message.
+            dict: JSON response with summary counts, actions, and current date.
 
-        WHEN TO USE (Store ONLY if ALL criteria are met):
-            - Information MUST be factual, objective, and verifiable
-            - Information MUST be stable and unlikely to change
-            - Information MUST be significant for future interactions
-            - Information MUST be non-obvious and not easily inferred
+        CRITERIA (Store ONLY if ALL are met):
+            ✓ Personal, factual, objective, verifiable about the USER
+            ✓ Stable and significant for future interactions
+            ✓ Non-obvious, not easily inferred
+            ✗ General info, questions, comparisons, technical how-tos
+            ✗ Temporary (mood, tasks, weather), subjective (opinions, feelings)
+            ✗ Speculative ("might", "considering"), trivial details
 
-        WHAT NOT TO STORE:
-            - Ephemeral or temporary information (e.g., daily tasks, current mood, weather)
-            - Subjective content (e.g., opinions, feelings, worries)
-            - Speculative or hypothetical information ("might", "considering getting a dog", "had pasta for lunch")
-            - Common knowledge or trivial details
+        FORMAT: Start with "User" or "User's" • Atomic facts • English only • Dates: dd-mm-yyyy • Preserve proper names/acronyms
 
-        MEMORY FORMAT:
-            - Each memory MUST start with "User" or "User's"
-            - Each memory MUST be a single, atomic, indivisible fact
-            - All memories MUST be stored in English, regardless of chat language
-            - Dates MUST be in dd-mm-yyyy format
-            - Proper names (people, places, organizations) MUST preserve correct capitalization
-            - Special abbreviations and acronyms MUST maintain proper casing (e.g., "AI", "PhD", "CEO", "MIT", "NASA")
-            - DO NOT include conversational filler
+        EXAMPLES (Store → Recall):
+            "I'm a senior ML engineer at Google Munich, working on LLMs since 15-03-2023"
+            → Store: "User works as a senior ML engineer at Google Munich." + "User has been working on LLMs since 15-03-2023."
+            → Recall: "User's ML engineering work at Google and LLM experience"
 
-        EXAMPLES:
-            Input: "I work as a software architect at TechCorp for 3 years, leading cloud migration for 2M+ users"
-            Store: "User works as a software architect at TechCorp, leading cloud migration projects."
-                   "User works on products serving over 2 million users globally."
+            "Mein Sohn Alex studiert Medizin in Berlin und wird Kardiologe"
+            → Store: "User's son Alex studies medicine in Berlin." + "User's son Alex plans to become a cardiologist."
+            → Recall: "User's son Alex's medical studies and cardiology plans"
 
-            Input: "Oğlum Mehmet Boğaziçi'nde bilgisayar mühendisliği 3. sınıfta, yapay zeka alanında uzmanlaşacak"
-            Store: "User's son Mehmet is a 3rd year computer science student at Boğaziçi University."
-                   "User's son Mehmet is planning to specialize in AI."
+            "Kronik migrenim var, günde 2 kahve içerim"
+            → Store: "User has chronic migraines." + "User drinks 2 coffees daily."
+            → Recall: "User's chronic migraines and coffee consumption habits"
 
-            Input: "Ma fille Sophie acceptée en doctorat neurosciences à la Sorbonne, recherche sur plasticité cérébrale"
-            Store: "User's daughter Sophie was accepted to a neuroscience PhD program at Sorbonne."
-                   "User's daughter Sophie is researching brain plasticity."
+            "What's the best programming language for beginners?"
+            → Store: NOTHING (general question)
+            → Recall: NOTHING
         """
         if not isinstance(input_data, list):
             raise TypeError("input_data must be a list of strings.")
@@ -420,36 +414,44 @@ class Tools:
         __event_emitter__: Optional[Any] = None,
     ) -> dict:
         """
-        Find stored memories semantically matching your query. The user's query, regardless of the original language, MUST be translated into a concise, factual English query before being passed to this tool.
+        Find stored memories semantically matching your query.
+
+        TRANSLATION REQUIREMENT:
+            The user's query, regardless of language, MUST be translated into a concise, factual English query before searching.
 
         Args:
             query (str): Natural language query in English. REQUIRED.
-            __user__ (Optional[dict], optional): User context provided automatically by the system.
-            __event_emitter__ (Optional[Callable], optional): Callback for status updates.
 
         Returns:
-            dict: Formatted text with current date and found memories, or JSON error response with the current date and a clear message if no memories are found.
+            dict: Current date and found memories, or error message if none found.
 
-        WHEN TO USE:
-            - Before answering questions about user's preferences, relationships, or past statements.
-            - When the user mentions specific entities like people (family, colleagues), places, or projects.
-            - When discussing personal details such as health, interests, professional background, or long-term goals.
-            - To recall past decisions, significant life events, or specific skills the user has.
+        TRIGGERS (ALWAYS use when user mentions):
+            ✓ Proper nouns, names, places, brands (e.g., "Maria", "Tokyo", "iPhone")
+            ✓ Personal experiences, symptoms, feelings, situations
+            ✓ Daily life, routines, work stress, health, family issues
+            ✓ PERSONAL preferences, relationships, past statements
+            ✗ General info queries without personal context
 
-        QUERY FORMAT STRATEGY:
-            - GOAL: To create a query that is rich in context and detail. MORE DETAIL IS BETTER.
-            - METHOD: Instead of just extracting keywords, formulate a descriptive sentence or question that captures the user's full intent. Combine key entities, actions, and concepts from the user's recent messages.
-            - LANGUAGE: The final query MUST be in English.
+        QUERY STRATEGY: Create rich, contextual queries combining entities, actions, and concepts. MORE DETAIL IS BETTER.
 
-        EXAMPLES (Notice how the 'Query' is more descriptive than just keywords):
-            User (English): "David's been struggling with anxiety at his consulting firm. Should he talk to Dr. Martinez again?"
-            Query: "David's anxiety issues at his consulting firm and his previous therapy sessions with Dr. Martinez"
+        EXAMPLES (Store → Recall):
+            "I'm a senior ML engineer at Google Munich, working on LLMs since 15-03-2023"
+            → Store: "User works as a senior ML engineer at Google Munich." + "User has been working on LLMs since 15-03-2023."
+            → Recall: "User's ML engineering work at Google and LLM experience"
 
-            User (Turkish): "Geçenlerde bahsettiğim, köpeğim Fıstık'ın alerjisi için hangi mamayı önermiştin?"
-            Query: "User's dog Fıstık's allergies and previous food recommendations"
+            "Mein Sohn Alex studiert Medizin in Berlin und wird Kardiologe"
+            → Store: "User's son Alex studies medicine in Berlin." + "User's son Alex plans to become a cardiologist."
+            → Recall: "User's son Alex's medical studies and cardiology plans"
 
-            User (French): "J'ai rendez-vous chez le cardiologue demain pour mon traitement."
-            Query: "User's upcoming cardiology appointment and treatment follow-up"
+            "Kronik migrenim var, günde 2 kahve içerim"
+            → Store: "User has chronic migraines." + "User drinks 2 coffees daily."
+            → Recall: "User's chronic migraines and coffee consumption habits"
+
+            "What's the best programming language for beginners?"
+            → Store: NOTHING (general question)
+            → Recall: NOTHING
+
+        NOTE: Only memories meeting add_memories criteria are available. General, temporary, or subjective info cannot be recalled.
         """
         current_date_str = datetime.now().strftime("%d-%m-%Y")
         error_payload = {
