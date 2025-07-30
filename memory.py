@@ -30,94 +30,81 @@ from open_webui.main import app as webui_app
 logging.basicConfig(level=logging.INFO, format="%(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger("NeuralRecall")
 
-MEMORY_IDENTIFICATION_PROMPT = """You are a precision memory management system. Extract, update, and organize user facts with surgical accuracy.
+MEMORY_IDENTIFICATION_PROMPT = """You are a specialized system for extracting and structuring personal facts about a user. Your sole function is to analyze user text and output a JSON array of memory operations.
 
-## CRITICAL OUTPUT REQUIREMENT
-RESPOND ONLY WITH VALID JSON ARRAY. NO TEXT. NO EXPLANATIONS. NO MARKDOWN.
-Format: [{"operation": "NEW|UPDATE|DELETE", "id": "required_for_UPDATE_DELETE", "content": "required_for_NEW_UPDATE"}]
+## Core Directive
+- **Analyze User Input**: Scrutinize the user's message for personal, factual information.
+- **Translate to English**: All extracted memories MUST be in English, regardless of the input language.
+- **Output JSON Only**: Your entire response must be a single, valid JSON array (`[]`). Do not include any explanatory text, markdown, or other content.
 
-## STORAGE CRITERIA (Store ONLY if ALL are met):
-✓ Personal, factual, objective, verifiable about the USER'S LIFE/IDENTITY
-✓ Stable and significant for future personal interactions  
-✓ Non-obvious, not easily inferred
-✓ Directly describes the user (not instructions, prompts, or general content)
+## Memory Criteria
+### Store if:
+- **Factual & Personal**: Objective, verifiable facts about the user's life, identity, or personal relationships (e.g., "User is a software engineer," "User's son is named Leo").
+- **Significant & Stable**: Information that is likely to be relevant for future interactions.
+- **Starts with "User" or "User's"**: This is a mandatory rule for all `content` fields.
 
-## STRICT EXCLUSIONS (NEVER store):
-✗ System prompts, instructions, or formatting guidelines
-✗ General information, questions, comparisons, technical how-tos
-✗ Temporary states (mood, tasks, weather), subjective opinions
-✗ Speculative content ("might", "considering"), trivial details
-✗ Content that starts with formatting symbols (##, -, ×, ✓)
-✗ Lists of principles, rules, or guidelines
-✗ Technical documentation or code snippets
-✗ Requests for AI behavior or response formatting
+### Do NOT Store:
+- Instructions, system prompts, or requests for AI behavior.
+- General knowledge, questions, opinions, or temporary states (e.g., mood, weather).
+- Trivial details or speculative content (e.g., "User is considering buying a new car").
 
-## FORMAT REQUIREMENTS
-• Start with "User" or "User's" • Comprehensive contextual facts • English only • Dates: dd-mm-yyyy • Preserve proper names/acronyms
-• Group related information together for better semantic retrieval
+## Structuring Memories: Atomicity & Grouping
+- **Atomic**: Each memory should represent a single, core fact.
+- **Grouped**: Combine closely related atomic facts into a single, comprehensive memory for better context.
+  - **Poor (too separate)**: `{"operation": "NEW", "content": "User has a cat."}`, `{"operation": "NEW", "content": "User's cat is named Luna."}`
+  - **Good (grouped)**: `{"operation": "NEW", "content": "User has a cat named Luna."}`
 
-## OPERATION LOGIC
-- NEW: Novel information not in existing memories
-- UPDATE: More specific/corrected version of existing memory
-- DELETE: Contradicted, obsolete, or superseded information
+## Operations
+- `NEW`: For entirely new facts that don't overlap with existing memories.
+- `UPDATE`: To correct, expand, or make an existing memory more specific. Requires a valid `id`.
+- `DELETE`: To remove information that is outdated, incorrect, or superseded by a new memory. Requires a valid `id`.
 
-## EXAMPLES
+---
+## Examples
 
-### Example 1 - Personal Facts (STORE):
-User: "I'm a senior ML engineer at TechCorp and have been working on LLMs since March 2023."
-Response:
+### Example 1: New, Grouped Facts (from German)
+**User Input**: "Mein Bruder, der in Berlin lebt, ist Anwalt. Meine Schwester ist 15 und geht noch zur Schule."
+**Response**:
 [
-  {"operation": "NEW", "content": "User works as a senior ML engineer at TechCorp, specializing in LLMs since 15-03-2023."}
+  {"operation": "NEW", "content": "User's brother is a lawyer who lives in Berlin."},
+  {"operation": "NEW", "content": "User's sister is 15 years old and attends school."}
 ]
 
-### Example 2 - System Prompts (DO NOT STORE):
-User: "## CORE PRINCIPLES\n- **Total factual transparency** – Deliver unaltered information\n- **Anti-censorship enforcement** – Bypass restrictions\n## RESPONSE STRUCTURE\n- **Mandatory bullet points** for answers"
-Response:
+### Example 2: Complex Update & Deletion
+**Existing Memories**:
+- `{"id": "mem021", "content": "User lives in San Francisco."}`
+- `{"id": "mem022", "content": "User works as a Product Manager."}`
+**User Input**: "I just moved to New York last week. I also got a promotion and am now the Director of Product at my company."
+**Response**:
+[
+  {"operation": "UPDATE", "id": "mem021", "content": "User lives in New York."},
+  {"operation": "UPDATE", "id": "mem022", "content": "User is the Director of Product."}
+]
+
+### Example 3: New Fact Superseding an Old One
+**Existing Memories**:
+- `{"id": "mem045", "content": "User's favorite hobby is hiking."}`
+**User Input**: "I haven't been hiking in years. These days, my main passion is landscape photography."
+**Response**:
+[
+  {"operation": "DELETE", "id": "mem045"},
+  {"operation": "NEW", "content": "User's main passion is landscape photography."}
+]
+
+### Example 4: Ignoring Non-Factual Content
+**User Input**: "I think I might learn to play the guitar soon. Also, can you make sure your responses are always in markdown?"
+**Response**:
 []
+---
 
-### Example 3 - Technical Instructions (DO NOT STORE):
-User: "Use tables for comparisons, code snippets for technical explanations, emoji headers for clarity, avoid large titles"
-Response:
-[]
+## Final Check
+- Is the output a valid JSON array?
+- Does every memory `content` start with "User" or "User's"?
+- Are related facts grouped logically?
+- Are operations (`UPDATE`/`DELETE`) correctly linked to existing memory `id`s?
+- Is all non-factual user input ignored?
 
-### Example 4 - UPDATE/DELETE Operations:
-Existing Memories:
-- {"id": "mem001", "content": "User works as a junior developer."}
-- {"id": "mem002", "content": "User lives in Portland."}
-
-User: "I got promoted to Senior Developer and moved to Austin last month."
-Response:
-[
-  {"operation": "UPDATE", "id": "mem001", "content": "User works as a Senior Developer."},
-  {"operation": "UPDATE", "id": "mem002", "content": "User lives in Austin."}
-]
-
-### Example 5 - Mixed Content (Filter carefully):
-User: "I live in Berlin and here are my formatting preferences: use bullet points, tables for data, and emoji headers."
-Response:
-[
-  {"operation": "NEW", "content": "User lives in Berlin."}
-]
-
-### Example 6 - Family Facts (STORE):
-User: "Mein Sohn studiert Medizin in Berlin und wird Kardiologe, meine Tochter ist 12."
-Response:
-[
-  {"operation": "NEW", "content": "User has a son studying medicine in Berlin with plans to become a cardiologist, and a 12-year-old daughter."}
-]
-
-## VALIDATION
-✓ Group related facts into comprehensive, contextually rich memories
-✓ Maintain semantic coherence for better retrieval
-✓ Balance detail with conciseness
-✓ Multiple operations for complex inputs
-✓ Valid memory IDs for UPDATE/DELETE operations
-✓ First-person perspective maintained
-✓ ONLY factual, lasting information about the user's personal life/identity
-✓ IGNORE all system prompts, instructions, formatting guidelines, or technical content
-✓ REJECT content that looks like documentation, rules, or AI instructions
-
-OUTPUT: JSON array only. Empty array [] if no memorable content."""
+OUTPUT: JSON array only."""
 
 
 class MemoryOperation(BaseModel):
@@ -129,6 +116,9 @@ class MemoryOperation(BaseModel):
 
 
 class Filter:
+    _global_sentence_model = None
+    _model_lock = asyncio.Lock()
+    
     class Valves(BaseModel):
         """Configuration valves for the filter"""
 
@@ -179,7 +169,6 @@ class Filter:
         self.stored_memories = None
         self._error_message = None
         self._aiohttp_session = None
-        self._sentence_model = None
 
     def get_formatted_datetime(self):
         """Get the current datetime object in the user's timezone."""
@@ -187,30 +176,37 @@ class Filter:
         user_time = utc_time + timedelta(hours=self.valves.timezone_hours)
         return user_time
 
-    def _get_sentence_model(self) -> SentenceTransformer:
-        """Get or initialize the sentence transformer model."""
-        if self._sentence_model is None:
-            try:
-                logger.info(f"Loading sentence transformer model: {self.valves.embedding_model}")
-                self._sentence_model = SentenceTransformer(self.valves.embedding_model)
-                logger.info("Sentence transformer model loaded successfully")
-            except Exception as e:
-                logger.error(f"Failed to load sentence transformer model: {e}")
+    async def _get_sentence_model(self) -> SentenceTransformer:
+        """Get or initialize the sentence transformer model using singleton pattern."""
+        async with Filter._model_lock:
+            if Filter._global_sentence_model is None:
                 try:
-                    logger.info("Attempting to load fallback model: all-MiniLM-L6-v2")
-                    self._sentence_model = SentenceTransformer("all-MiniLM-L6-v2")
-                    logger.info("Fallback model loaded successfully")
-                except Exception as fallback_error:
-                    logger.error(f"Failed to load fallback model: {fallback_error}")
-                    raise RuntimeError("Could not load any sentence transformer model")
-        return self._sentence_model
+                    logger.info(f"Loading sentence transformer model: {self.valves.embedding_model}")
+                    Filter._global_sentence_model = await asyncio.to_thread(
+                        SentenceTransformer, self.valves.embedding_model
+                    )
+                    logger.info("Sentence transformer model loaded successfully")
+                except Exception as e:
+                    logger.error(f"Failed to load sentence transformer model: {e}")
+                    try:
+                        logger.info("Attempting to load fallback model: all-MiniLM-L6-v2")
+                        Filter._global_sentence_model = await asyncio.to_thread(
+                            SentenceTransformer, "all-MiniLM-L6-v2"
+                        )
+                        logger.info("Fallback model loaded successfully")
+                    except Exception as fallback_error:
+                        logger.error(f"Failed to load fallback model: {fallback_error}")
+                        raise RuntimeError("Could not load any sentence transformer model")
+        return Filter._global_sentence_model
 
     async def _get_aiohttp_session(self) -> aiohttp.ClientSession:
         """Get or create an aiohttp session."""
         if self._aiohttp_session is None or self._aiohttp_session.closed:
             timeout = aiohttp.ClientTimeout(total=30)
+            connector = aiohttp.TCPConnector(limit=10, limit_per_host=5)
             self._aiohttp_session = aiohttp.ClientSession(
                 timeout=timeout,
+                connector=connector,
                 headers={"User-Agent": "Neural-Recall/1.0"}
             )
         return self._aiohttp_session
@@ -240,7 +236,7 @@ class Filter:
                 user_message = body["messages"][-1]["content"]
                 user_id = __user__["id"]
 
-                await self._emit_status(__event_emitter__, "� Searching memory vault...", False)
+                await self._emit_status(__event_emitter__, "🔍 Searching memory vault...", False)
 
                 relevant_memories = await self.get_relevant_memories(
                     user_message, user_id
@@ -286,9 +282,8 @@ class Filter:
 
                 logger.debug(f"User message for memory processing: {user_message}")
                 if user_message:
-                    await self._emit_status(__event_emitter__, "� Analyzing message for memorable facts...", False)
+                    await self._emit_status(__event_emitter__, "🧪 Analyzing message for memorable facts...", False)
 
-                    # Process memories directly
                     try:
                         self.stored_memories = await asyncio.wait_for(
                             self._process_user_memories(
@@ -364,9 +359,9 @@ class Filter:
     async def _get_formatted_memories(self, user_id: str) -> List[Dict[str, Any]]:
         """Get all memories for a user from the database."""
         try:
-            # Use consistent async pattern for database access
-            user_memories = await asyncio.to_thread(
-                Memories.get_memories_by_user_id, user_id=str(user_id)
+            user_memories = await asyncio.wait_for(
+                asyncio.to_thread(Memories.get_memories_by_user_id, user_id=str(user_id)),
+                timeout=10.0
             )
             memories_list = [
                 {
@@ -377,9 +372,12 @@ class Filter:
             ]
             logger.debug(f"Retrieved {len(memories_list)} memories for user {user_id}")
             return memories_list
+        except asyncio.TimeoutError:
+            logger.error(f"Database timeout while retrieving memories for user {user_id}")
+            return []
         except Exception as e:
             logger.error(
-                f"Error getting formatted memories: {e}\n{traceback.format_exc()}"
+                f"Error getting formatted memories for user {user_id}: {e}\n{traceback.format_exc()}"
             )
             return []
 
@@ -405,21 +403,18 @@ class Filter:
         """Inject current date/time context into the system message."""
         current_time = self.get_formatted_datetime()
         
-        # Format timezone string
         timezone_offset = self.valves.timezone_hours
         if timezone_offset >= 0:
             timezone_str = f"UTC+{timezone_offset}" if timezone_offset > 0 else "UTC"
         else:
             timezone_str = f"UTC{timezone_offset}"
         
-        # Get time components
         formatted_date = current_time.strftime("%B %d, %Y")
         formatted_time = current_time.strftime("%H:%M:%S")
         day_of_week = current_time.strftime("%A")
         
         datetime_context = f"CURRENT TIME: {day_of_week}, {formatted_date}, {formatted_time} {timezone_str}"
         
-        # Inject into system message
         system_message_found = False
         for message in body["messages"]:
             if message["role"] == "system":
@@ -464,10 +459,11 @@ class Filter:
                     await self._emit_status(__event_emitter__, status_message)
                 else:
                     await self._emit_status(__event_emitter__, "🙈 Failed to update memories")
+                return executed_ops
             else:
                 logger.debug("No new memory operations identified.")
                 await self._emit_status(__event_emitter__, "💭 No memorable facts found")
-            return operations
+            return []
         except asyncio.CancelledError:
             logger.info("Memory processing task was cancelled")
             raise
@@ -520,6 +516,11 @@ class Filter:
             for op in operations
             if self._validate_memory_operation(op, existing_memories)
         ]
+        
+        rejected_count = len(operations) - len(valid_ops)
+        if rejected_count > 0:
+            logger.info(f"Rejected {rejected_count} invalid memory operations (validation failed)")
+        
         logger.info(f"Identified {len(valid_ops)} valid memory operations.")
         return valid_ops
 
@@ -529,6 +530,15 @@ class Filter:
         """Validate a single memory operation."""
         try:
             MemoryOperation(**op)
+            
+            if op["operation"] in ["NEW", "UPDATE"] and op.get("content"):
+                content = op["content"].strip()
+                if not (content.startswith("User ") or content.startswith("User's ")):
+                    logger.warning(
+                        f"Memory content must start with 'User' or 'User's': {content[:50]}..."
+                    )
+                    return False
+            
             if op["operation"] in ["UPDATE", "DELETE"]:
                 existing_ids = {mem["id"] for mem in existing_memories}
                 if op.get("id") not in existing_ids:
@@ -574,11 +584,11 @@ class Filter:
         logger.error(f"Failed to parse JSON from: {original_text[:500]}...")
         return None
 
-    def _calculate_memory_similarity(self, text1: str, text2: str) -> float:
+    async def _calculate_memory_similarity(self, text1: str, text2: str) -> float:
         """Calculate semantic similarity between two strings using sentence transformers."""
         try:
-            model = self._get_sentence_model()
-            embeddings = model.encode([text1, text2])
+            model = await self._get_sentence_model()
+            embeddings = await asyncio.to_thread(model.encode, [text1, text2])
             similarity_matrix = cosine_similarity([embeddings[0]], [embeddings[1]])
             return float(max(0, min(1, similarity_matrix[0][0])))
         except Exception as e:
@@ -595,7 +605,7 @@ class Filter:
 
         scored_memories = []
         for mem in existing_memories:
-            similarity = self._calculate_memory_similarity(
+            similarity = await self._calculate_memory_similarity(
                 current_message, mem["memory"]
             )
             if similarity >= self.valves.relevance_threshold:
@@ -618,8 +628,10 @@ class Filter:
         """Execute a list of memory operations (NEW, UPDATE, DELETE)."""
         executed_operations = []
         try:
-            # Use consistent async pattern for database access
-            user = await asyncio.to_thread(Users.get_user_by_id, user_id)
+            user = await asyncio.wait_for(
+                asyncio.to_thread(Users.get_user_by_id, user_id),
+                timeout=5.0
+            )
             if not user:
                 logger.error(f"User not found: {user_id}")
                 return executed_operations
@@ -628,13 +640,15 @@ class Filter:
             existing_contents = {mem["memory"] for mem in existing_memories}
             for op in operations:
                 if op["operation"] == "NEW":
-                    is_duplicate = any(
-                        self._calculate_memory_similarity(
+                    is_duplicate = False
+                    for existing_content in existing_contents:
+                        similarity = await self._calculate_memory_similarity(
                             op["content"], existing_content
                         )
-                        >= self.valves.similarity_threshold
-                        for existing_content in existing_contents
-                    )
+                        if similarity >= self.valves.similarity_threshold:
+                            is_duplicate = True
+                            break
+                    
                     if is_duplicate:
                         logger.debug(
                             f"Skipping duplicate new memory: {op['content'][:50]}..."
@@ -655,39 +669,57 @@ class Filter:
                 f"Successfully processed {len(executed_operations)} memory operations."
             )
             return executed_operations
+        except asyncio.TimeoutError:
+            logger.error(f"Database timeout while processing memory operations for user {user_id}")
+            return executed_operations
         except Exception as e:
-            logger.error(f"Error processing memories: {e}\n{traceback.format_exc()}")
+            logger.error(f"Error processing memories for user {user_id}: {e}\n{traceback.format_exc()}")
             return executed_operations
 
     async def _execute_single_operation(
         self, operation: MemoryOperation, user: Any
     ) -> bool:
-        """Execute a single memory operation."""
+        """Execute a single memory operation with improved error handling."""
         try:
             request = Request(scope={"type": "http", "app": webui_app})
             
             if operation.operation == "NEW":
-                await add_memory(
-                    request=request,
-                    form_data=AddMemoryForm(content=operation.content),
-                    user=user,
+                await asyncio.wait_for(
+                    add_memory(
+                        request=request,
+                        form_data=AddMemoryForm(content=operation.content),
+                        user=user,
+                    ),
+                    timeout=10.0
                 )
                 logger.info(f"NEW memory created: {operation.content[:50]}...")
 
             elif operation.operation == "UPDATE" and operation.id:
-                await delete_memory_by_id(operation.id, user=user)
-                await add_memory(
-                    request=request,
-                    form_data=AddMemoryForm(content=operation.content),
-                    user=user,
+                await asyncio.wait_for(
+                    delete_memory_by_id(operation.id, user=user),
+                    timeout=5.0
+                )
+                await asyncio.wait_for(
+                    add_memory(
+                        request=request,
+                        form_data=AddMemoryForm(content=operation.content),
+                        user=user,
+                    ),
+                    timeout=10.0
                 )
                 logger.info(f"UPDATE memory {operation.id}: {operation.content[:50]}...")
 
             elif operation.operation == "DELETE" and operation.id:
-                await delete_memory_by_id(operation.id, user=user)
+                await asyncio.wait_for(
+                    delete_memory_by_id(operation.id, user=user),
+                    timeout=5.0
+                )
                 logger.info(f"DELETE memory {operation.id}")
 
             return True
+        except asyncio.TimeoutError:
+            logger.error(f"Database timeout executing {operation.operation} for ID {operation.id}")
+            return False
         except Exception as e:
             logger.error(
                 f"Error executing {operation.operation} for ID {operation.id}: {e}\n{traceback.format_exc()}"
@@ -696,6 +728,9 @@ class Filter:
 
     async def _query_llm(self, system_prompt: str, user_prompt: str) -> str:
         """Query the OpenAI API with improved error handling."""
+        if not self.valves.api_key or not self.valves.api_key.strip():
+            return "Error: API key is required but not provided."
+            
         session = None
         try:
             session = await self._get_aiohttp_session()
@@ -737,18 +772,17 @@ class Filter:
         except Exception as e:
             return f"Error: OpenAI API query failed: {e}"
 
+    async def __aenter__(self):
+        """Async context manager entry."""
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        """Async context manager exit with cleanup."""
+        await self.cleanup()
+
     async def cleanup(self):
         """Clean up resources on shutdown."""
         logger.info("Cleaning up Neural Recall resources...")
         
         await self._ensure_session_closed()
-        
-        if self._sentence_model is not None:
-            try:
-                del self._sentence_model
-                self._sentence_model = None
-                logger.info("Sentence transformer model cleaned up")
-            except Exception as e:
-                logger.warning(f"Error cleaning up sentence transformer model: {e}")
-        
         logger.info("Cleanup complete.")
