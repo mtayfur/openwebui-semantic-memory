@@ -13,6 +13,8 @@ from difflib import SequenceMatcher
 import numpy as np
 from sentence_transformers import SentenceTransformer
 from sklearn.metrics.pairwise import cosine_similarity
+import hashlib
+import multiprocessing
 
 import aiohttp
 from fastapi.requests import Request
@@ -44,9 +46,13 @@ MEMORY_IDENTIFICATION_PROMPT = """You are a specialized system for extracting an
 - **Starts with "User" or "User's"**: This is a mandatory rule for all `content` fields.
 
 ### Do NOT Store:
-- Instructions, system prompts, or requests for AI behavior.
-- General knowledge, questions, opinions, or temporary states (e.g., mood, weather).
-- Trivial details or speculative content (e.g., "User is considering buying a new car").
+- **System Instructions**: Prompts, commands, AI behavior requests, or formatting guidelines.
+- **Temporary States**: Current mood, weather, tasks, or fleeting circumstances.
+- **Speculative Content**: Plans, intentions, considerations, or "might/could/thinking about" statements.
+- **Technical Content**: Code snippets, documentation, how-to guides, or troubleshooting.
+- **Meta-Content**: Lists of rules, principles, formatting symbols (##, -, ×, ✓), or instructional text.
+- **General Knowledge**: Questions, comparisons, opinions, or information not specific to the user.
+- **Transient Details**: Trivial facts, temporary preferences, or context-dependent information.
 
 ## Structuring Memories: Atomicity & Grouping
 - **Atomic**: Each memory should represent a single, core fact.
@@ -98,11 +104,13 @@ MEMORY_IDENTIFICATION_PROMPT = """You are a specialized system for extracting an
 ---
 
 ## Final Check
-- Is the output a valid JSON array?
-- Does every memory `content` start with "User" or "User's"?
-- Are related facts grouped logically?
-- Are operations (`UPDATE`/`DELETE`) correctly linked to existing memory `id`s?
-- Is all non-factual user input ignored?
+- **Format Validation**: Is the output a valid JSON array?
+- **Content Standards**: Does every memory `content` start with "User" or "User's"?
+- **Logical Structure**: Are related facts grouped logically and operations correctly linked to existing `id`s?
+- **Factual Filter**: Is all content factual, lasting information about the user's personal life/identity?
+- **Exclusion Compliance**: Have system instructions, temporary states, and speculative content been rejected?
+- **Technical Filter**: Are code snippets, documentation, formatting symbols, and meta-content excluded?
+- **Relevance Test**: Is transient, trivial, or general knowledge appropriately ignored?
 
 OUTPUT: JSON array only."""
 
@@ -118,6 +126,10 @@ class MemoryOperation(BaseModel):
 class Filter:
     _global_sentence_model = None
     _model_lock = asyncio.Lock()
+    _embedding_cache = {}
+    _cache_lock = asyncio.Lock()
+    
+    CACHE_MAX_SIZE = 2000
     
     class Valves(BaseModel):
         """Configuration valves for the filter"""
@@ -134,25 +146,22 @@ class Filter:
             default="gpt-4o-mini",
             description="OpenAI model to use for identifying facts to remember.",
         )
-
         related_memories_n: int = Field(
-            default=5,
+            default=12,
             description="Number of most relevant memories to inject into the context.",
         )
         relevance_threshold: float = Field(
-            default=0.5,
-            description="Minimum similarity score (0-1) for a memory to be considered relevant enough to be injected.",
+            default=0.6,
+            description="Baseline minimum similarity score (0-1) for a memory to be considered relevant enough to be injected.",
         )
         similarity_threshold: float = Field(
             default=0.9,
             description="Similarity threshold (0-1) for detecting and preventing duplicate memories.",
         )
-        
         embedding_model: str = Field(
             default="Snowflake/snowflake-arctic-embed-s",
             description="Sentence transformer model for semantic similarity.",
-        )
-        
+        ) 
         timezone_hours: int = Field(
             default=0,
             description="Timezone offset in hours (e.g., 5 for UTC+5, -4 for UTC-4).",
@@ -166,14 +175,19 @@ class Filter:
     def __init__(self):
         self.valves = self.Valves()
         self.user_valves = self.UserValves()
-        self.stored_memories = None
-        self._error_message = None
         self._aiohttp_session = None
+        
+        # Calculate optimal batch size based on CPU cores
+        cpu_count = multiprocessing.cpu_count()
+        # Use 2x CPU cores for batch size, with min 4 and max 32
+        self._batch_size = max(4, min(32, cpu_count * 2))
+        logger.info(f"Initialized batch processing with size {self._batch_size} (CPU cores: {cpu_count})")
 
     def get_formatted_datetime(self):
         """Get the current datetime object in the user's timezone."""
         utc_time = datetime.now(timezone.utc)
-        user_time = utc_time + timedelta(hours=self.valves.timezone_hours)
+        user_timezone = timezone(timedelta(hours=self.valves.timezone_hours))
+        user_time = utc_time.astimezone(user_timezone)
         return user_time
 
     async def _get_sentence_model(self) -> SentenceTransformer:
@@ -220,6 +234,135 @@ class Filter:
                 logger.warning(f"Error closing aiohttp session: {e}")
             finally:
                 self._aiohttp_session = None
+
+    def _generate_cache_key(self, text: str, user_id: str = None) -> str:
+        """Generate a cache key for text embedding."""
+        # Use text content and model name for cache key
+        cache_content = f"{text}|{self.valves.embedding_model}"
+        if user_id:
+            cache_content = f"{user_id}|{cache_content}"
+        return hashlib.md5(cache_content.encode()).hexdigest()
+
+    async def _get_cached_embedding(self, text: str, user_id: str = None) -> Optional[np.ndarray]:
+        """Get cached embedding for text if available."""
+        cache_key = self._generate_cache_key(text, user_id)
+        async with Filter._cache_lock:
+            user_cache = Filter._embedding_cache.get(user_id or "global", {})
+            if cache_key in user_cache:
+                logger.debug(f"Cache hit for text: {text[:50]}...")
+                return user_cache[cache_key]["embedding"]
+        return None
+
+    async def _cache_embedding(self, text: str, embedding: np.ndarray, user_id: str = None) -> None:
+        """Cache embedding for text."""
+        cache_key = self._generate_cache_key(text, user_id)
+        cache_user_key = user_id or "global"
+        
+        async with Filter._cache_lock:
+            if cache_user_key not in Filter._embedding_cache:
+                Filter._embedding_cache[cache_user_key] = {}
+            
+            user_cache = Filter._embedding_cache[cache_user_key]
+            
+            if len(user_cache) >= self.CACHE_MAX_SIZE:
+                entries_to_remove = max(1, len(user_cache) // 5)
+                sorted_entries = sorted(user_cache.items(), key=lambda x: x[1]["timestamp"])
+                for old_key, _ in sorted_entries[:entries_to_remove]:
+                    del user_cache[old_key]
+                logger.debug(f"Cleaned {entries_to_remove} old cache entries for user {cache_user_key}")
+            
+            user_cache[cache_key] = {
+                "embedding": embedding,
+                "timestamp": datetime.now().timestamp(),
+                "text_preview": text[:50]
+            }
+            logger.debug(f"Cached embedding for text: {text[:50]}...")
+
+    async def _get_embedding_with_cache(self, text: str, user_id: str = None) -> np.ndarray:
+        """Get embedding for text, using cache if available."""
+        cached_embedding = await self._get_cached_embedding(text, user_id)
+        if cached_embedding is not None:
+            return cached_embedding
+        
+        try:
+            model = await self._get_sentence_model()
+            embedding = await asyncio.to_thread(model.encode, [text])
+            embedding_array = embedding[0]
+            
+            await self._cache_embedding(text, embedding_array, user_id)
+            
+            return embedding_array
+        except Exception as e:
+            logger.error(f"Error generating embedding for text: {e}")
+            raise
+
+    async def _get_embeddings_batch(self, texts: List[str], user_id: str = None) -> List[np.ndarray]:
+        """Get embeddings for multiple texts using batch processing and caching."""
+        if not texts:
+            return []
+        
+        # Separate cached and non-cached texts
+        cached_embeddings = {}
+        texts_to_process = []
+        text_indices = {}
+        
+        for i, text in enumerate(texts):
+            cached_embedding = await self._get_cached_embedding(text, user_id)
+            if cached_embedding is not None:
+                cached_embeddings[i] = cached_embedding
+            else:
+                text_indices[len(texts_to_process)] = i
+                texts_to_process.append(text)
+        
+        logger.debug(f"Batch processing: {len(cached_embeddings)} cached, {len(texts_to_process)} to process")
+        
+        # Process remaining texts in batches
+        new_embeddings = {}
+        if texts_to_process:
+            try:
+                model = await self._get_sentence_model()
+                
+                # Process in batches for better CPU utilization
+                for batch_start in range(0, len(texts_to_process), self._batch_size):
+                    batch_end = min(batch_start + self._batch_size, len(texts_to_process))
+                    batch_texts = texts_to_process[batch_start:batch_end]
+                    
+                    # Generate embeddings for the batch
+                    batch_embeddings = await asyncio.to_thread(model.encode, batch_texts)
+                    
+                    # Store results and cache them
+                    for j, embedding in enumerate(batch_embeddings):
+                        original_index = text_indices[batch_start + j]
+                        new_embeddings[original_index] = embedding
+                        
+                        # Cache the embedding
+                        await self._cache_embedding(batch_texts[j], embedding, user_id)
+                
+                logger.debug(f"Generated {len(new_embeddings)} new embeddings in batches of {self._batch_size}")
+            
+            except Exception as e:
+                logger.error(f"Error in batch embedding generation: {e}")
+                raise
+        
+        # Combine cached and new embeddings in original order
+        result = []
+        for i in range(len(texts)):
+            if i in cached_embeddings:
+                result.append(cached_embeddings[i])
+            elif i in new_embeddings:
+                result.append(new_embeddings[i])
+            else:
+                raise ValueError(f"Missing embedding for text at index {i}")
+        
+        return result
+
+    async def _get_cache_stats(self, user_id: str = None) -> str:
+        """Get cache statistics for debugging."""
+        cache_user_key = user_id or "global"
+        async with Filter._cache_lock:
+            user_cache = Filter._embedding_cache.get(cache_user_key, {})
+            total_cache_size = sum(len(cache) for cache in Filter._embedding_cache.values())
+            return f"user: {len(user_cache)}, total: {total_cache_size}"
 
     async def inlet(
         self,
@@ -285,7 +428,7 @@ class Filter:
                     await self._emit_status(__event_emitter__, "🧪 Analyzing message for memorable facts...", False)
 
                     try:
-                        self.stored_memories = await asyncio.wait_for(
+                        await asyncio.wait_for(
                             self._process_user_memories(
                                 user_message,
                                 __user__["id"],
@@ -295,7 +438,6 @@ class Filter:
                         )
                     except asyncio.TimeoutError:
                         logger.warning("Memory processing timed out, continuing without waiting")
-                        self.stored_memories = []
         except Exception as e:
             logger.error(f"Error in outlet: {e}\n{traceback.format_exc()}")
             await self._emit_status(__event_emitter__, f"🙈 Error processing memories: {str(e)}")
@@ -469,7 +611,6 @@ class Filter:
             raise
         except Exception as e:
             logger.error(f"Unexpected error in memory processing: {e}\n{traceback.format_exc()}")
-            self._error_message = f"Memory processing failed: {str(e)}"
             return []
 
     async def identify_memory_operations(
@@ -487,12 +628,11 @@ class Filter:
             )
             system_prompt += mem_context
 
-        date_context = f"\n\nCurrent Date/Time: {self.get_formatted_datetime().strftime('%A, %B %d, %Y %H:%M:%S %Z')}"
+        date_context = f"\n\nCurrent Date/Time: {self.get_formatted_datetime().strftime('%A, %B %d, %Y %H:%M:%S %z')}"
         system_prompt += date_context
 
         response = await self._query_llm(system_prompt, input_text)
         if not response or response.startswith("Error:"):
-            self._error_message = response
             logger.error(f"Error from LLM during memory identification: {response}")
             return []
 
@@ -584,38 +724,96 @@ class Filter:
         logger.error(f"Failed to parse JSON from: {original_text[:500]}...")
         return None
 
-    async def _calculate_memory_similarity(self, text1: str, text2: str) -> float:
-        """Calculate semantic similarity between two strings using sentence transformers."""
+    async def _calculate_memory_similarity(self, text1: str, text2: str, user_id: str = None) -> float:
+        """Calculate semantic similarity between two strings using cached sentence transformers."""
         try:
-            model = await self._get_sentence_model()
-            embeddings = await asyncio.to_thread(model.encode, [text1, text2])
-            similarity_matrix = cosine_similarity([embeddings[0]], [embeddings[1]])
+            embedding1 = await self._get_embedding_with_cache(text1, user_id)
+            embedding2 = await self._get_embedding_with_cache(text2, user_id)
+            
+            similarity_matrix = cosine_similarity([embedding1], [embedding2])
             return float(max(0, min(1, similarity_matrix[0][0])))
         except Exception as e:
             logger.warning(f"Error calculating semantic similarity, falling back to string similarity: {e}")
             return SequenceMatcher(None, text1.lower(), text2.lower()).ratio()
 
+    def _calculate_dynamic_threshold(self, scored_memories: List[Dict[str, Any]]) -> float:
+        """Calculate a dynamic threshold based on score distribution while maintaining a baseline minimum."""
+        if not scored_memories:
+            return self.valves.relevance_threshold
+        
+        baseline_threshold = self.valves.relevance_threshold
+        scores = [mem["relevance"] for mem in scored_memories]
+        
+        if len(scores) <= self.valves.related_memories_n:
+            return baseline_threshold
+        
+        top_n_scores = scores[:self.valves.related_memories_n]
+        avg_top_n = sum(top_n_scores) / len(top_n_scores)
+        max_score = max(scores)
+        
+        dynamic_threshold = max(baseline_threshold, avg_top_n - 0.05)
+        
+        score_gap = max_score - avg_top_n
+        if score_gap > 0.2: 
+            dynamic_threshold = max(baseline_threshold, avg_top_n + 0.05)
+        
+        return min(dynamic_threshold, 0.95) 
+
     async def get_relevant_memories(
         self, current_message: str, user_id: str
     ) -> List[Dict[str, Any]]:
-        """Get memories relevant to the current context using sentence similarity."""
+        """Get memories relevant to the current context using cached sentence similarity with dynamic threshold."""
         existing_memories = await self._get_formatted_memories(user_id)
         if not existing_memories:
             return []
 
-        scored_memories = []
-        for mem in existing_memories:
-            similarity = await self._calculate_memory_similarity(
-                current_message, mem["memory"]
-            )
-            if similarity >= self.valves.relevance_threshold:
+        # Prepare texts for batch processing
+        memory_texts = [mem["memory"] for mem in existing_memories]
+        all_texts = [current_message] + memory_texts
+        
+        # Get embeddings in batch (much faster for many memories)
+        try:
+            all_embeddings = await self._get_embeddings_batch(all_texts, user_id)
+            current_embedding = all_embeddings[0]
+            memory_embeddings = all_embeddings[1:]
+        except Exception as e:
+            logger.warning(f"Batch processing failed, falling back to individual processing: {e}")
+            # Fallback to individual processing
+            scored_memories = []
+            for mem in existing_memories:
+                similarity = await self._calculate_memory_similarity(
+                    current_message, mem["memory"], user_id
+                )
+                scored_memories.append({**mem, "relevance": similarity})
+        else:
+            # Calculate similarities using batch embeddings
+            scored_memories = []
+            for i, mem in enumerate(existing_memories):
+                try:
+                    similarity_matrix = cosine_similarity([current_embedding], [memory_embeddings[i]])
+                    similarity = float(max(0, min(1, similarity_matrix[0][0])))
+                except Exception as e:
+                    logger.warning(f"Error calculating similarity for memory {i}, using fallback: {e}")
+                    similarity = SequenceMatcher(None, current_message.lower(), mem["memory"].lower()).ratio()
+                
                 scored_memories.append({**mem, "relevance": similarity})
 
         scored_memories.sort(key=lambda x: x["relevance"], reverse=True)
-        result = scored_memories[:self.valves.related_memories_n]
+        
+        dynamic_threshold = self._calculate_dynamic_threshold(scored_memories)
+        
+        filtered_memories = [
+            mem for mem in scored_memories 
+            if mem["relevance"] >= dynamic_threshold
+        ]
+        
+        result = filtered_memories[:self.valves.related_memories_n]
 
+        cache_stats = await self._get_cache_stats(user_id)
         logger.info(
-            f"Found {len(scored_memories)} relevant memories above threshold {self.valves.relevance_threshold}. Returning top {len(result)}."
+            f"Dynamic threshold: {dynamic_threshold:.3f} (baseline: {self.valves.relevance_threshold:.3f}). "
+            f"Found {len(filtered_memories)} relevant memories above threshold. Returning top {len(result)}. "
+            f"Cache stats: {cache_stats}"
         )
         return result
 
@@ -638,23 +836,66 @@ class Filter:
 
             ops_to_execute = []
             existing_contents = {mem["memory"] for mem in existing_memories}
-            for op in operations:
-                if op["operation"] == "NEW":
-                    is_duplicate = False
-                    for existing_content in existing_contents:
-                        similarity = await self._calculate_memory_similarity(
-                            op["content"], existing_content
-                        )
-                        if similarity >= self.valves.similarity_threshold:
-                            is_duplicate = True
-                            break
+            
+            # Collect all NEW operations for batch processing
+            new_operations = [op for op in operations if op["operation"] == "NEW"]
+            other_operations = [op for op in operations if op["operation"] != "NEW"]
+            
+            # Process NEW operations with batch similarity checking
+            if new_operations and existing_contents:
+                try:
+                    # Prepare texts for batch processing
+                    new_contents = [op["content"] for op in new_operations]
+                    existing_list = list(existing_contents)
                     
-                    if is_duplicate:
-                        logger.debug(
-                            f"Skipping duplicate new memory: {op['content'][:50]}..."
-                        )
-                        continue
-                ops_to_execute.append(op)
+                    # Get embeddings for all new and existing memories
+                    all_texts = new_contents + existing_list
+                    all_embeddings = await self._get_embeddings_batch(all_texts, user_id)
+                    
+                    new_embeddings = all_embeddings[:len(new_contents)]
+                    existing_embeddings = all_embeddings[len(new_contents):]
+                    
+                    # Check each new operation for duplicates
+                    for i, op in enumerate(new_operations):
+                        is_duplicate = False
+                        new_embedding = new_embeddings[i]
+                        
+                        for existing_embedding in existing_embeddings:
+                            similarity_matrix = cosine_similarity([new_embedding], [existing_embedding])
+                            similarity = float(similarity_matrix[0][0])
+                            
+                            if similarity >= self.valves.similarity_threshold:
+                                is_duplicate = True
+                                break
+                        
+                        if is_duplicate:
+                            logger.debug(f"Skipping duplicate new memory: {op['content'][:50]}...")
+                        else:
+                            ops_to_execute.append(op)
+                            
+                except Exception as e:
+                    logger.warning(f"Batch duplicate detection failed, falling back to individual: {e}")
+                    # Fallback to individual processing
+                    for op in new_operations:
+                        is_duplicate = False
+                        for existing_content in existing_contents:
+                            similarity = await self._calculate_memory_similarity(
+                                op["content"], existing_content, user_id
+                            )
+                            if similarity >= self.valves.similarity_threshold:
+                                is_duplicate = True
+                                break
+                        
+                        if is_duplicate:
+                            logger.debug(f"Skipping duplicate new memory: {op['content'][:50]}...")
+                        else:
+                            ops_to_execute.append(op)
+            else:
+                # No existing memories to compare against, add all NEW operations
+                ops_to_execute.extend(new_operations)
+            
+            # Add all non-NEW operations (no duplicate checking needed)
+            ops_to_execute.extend(other_operations)
             
             logger.debug(
                 f"Executing {len(ops_to_execute)} memory operations after filtering."
@@ -772,17 +1013,15 @@ class Filter:
         except Exception as e:
             return f"Error: OpenAI API query failed: {e}"
 
-    async def __aenter__(self):
-        """Async context manager entry."""
-        return self
-
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
-        """Async context manager exit with cleanup."""
-        await self.cleanup()
-
     async def cleanup(self):
         """Clean up resources on shutdown."""
         logger.info("Cleaning up Neural Recall resources...")
         
         await self._ensure_session_closed()
+        
+        async with Filter._cache_lock:
+            cache_size = sum(len(cache) for cache in Filter._embedding_cache.values())
+            Filter._embedding_cache.clear()
+            logger.info(f"Cleared embedding cache ({cache_size} entries)")
+        
         logger.info("Cleanup complete.")
