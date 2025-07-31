@@ -132,7 +132,7 @@ class Filter:
         )
         model: str = Field(
             default="gpt-4o-mini",
-            description="OpenAI model to use for identifying facts to remember. Examples: gpt-4o-mini, gpt-4o, gpt-3.5-turbo.",
+            description="OpenAI model to use for identifying facts to remember.",
         )
 
         related_memories_n: int = Field(
@@ -150,7 +150,7 @@ class Filter:
         
         embedding_model: str = Field(
             default="all-MiniLM-L6-v2",
-            description="Sentence transformer model for semantic similarity. Examples: all-MiniLM-L6-v2 (fast), all-mpnet-base-v2 (better quality).",
+            description="Sentence transformer model for semantic similarity.",
         )
         
         timezone_hours: int = Field(
