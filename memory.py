@@ -149,7 +149,7 @@ class Filter:
         )
         
         embedding_model: str = Field(
-            default="all-MiniLM-L6-v2",
+            default="Snowflake/snowflake-arctic-embed-s",
             description="Sentence transformer model for semantic similarity.",
         )
         
