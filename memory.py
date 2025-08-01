@@ -40,18 +40,21 @@ MEMORY_IDENTIFICATION_PROMPT = """You are a specialized system for extracting an
 - **Output JSON Only**: Your entire response must be a single, valid JSON array (`[]`). Do not include any explanatory text, markdown, or other content.
 
 ## Memory Criteria
-### Store if:
+### Store ONLY if:
 - **Factual & Personal**: Objective, verifiable facts about the user's life, identity, or personal relationships (e.g., "User is a software engineer," "User's son is named Leo").
 - **Significant & Stable**: Information that is likely to be relevant for future interactions.
 - **Starts with "User" or "User's"**: This is a mandatory rule for all `content` fields.
+- **About the User**: Must be information that describes the user personally, not their questions or interests in external topics.
 
-### Do NOT Store:
+### NEVER Store:
+- **Questions**: Any form of question, inquiry, or request for information (e.g., "Why did X happen?", "What is Y?", "How to do Z?").
+- **General Knowledge Inquiries**: Questions about celebrities, historical events, how-to guides, or any topic not about the user.
 - **System Instructions**: Prompts, commands, AI behavior requests, or formatting guidelines.
 - **Temporary States**: Current mood, weather, tasks, or fleeting circumstances.
 - **Speculative Content**: Plans, intentions, considerations, or "might/could/thinking about" statements.
 - **Technical Content**: Code snippets, documentation, how-to guides, or troubleshooting.
 - **Meta-Content**: Lists of rules, principles, formatting symbols (##, -, ×, ✓), or instructional text.
-- **General Knowledge**: Questions, comparisons, opinions, or information not specific to the user.
+- **Casual Conversations**: Greetings, acknowledgments, reactions, or conversational responses.
 - **Transient Details**: Trivial facts, temporary preferences, or context-dependent information.
 
 ## Structuring Memories: Atomicity & Grouping
@@ -97,8 +100,21 @@ MEMORY_IDENTIFICATION_PROMPT = """You are a specialized system for extracting an
   {"operation": "NEW", "content": "User's main passion is landscape photography."}
 ]
 
-### Example 4: Ignoring Non-Factual Content
-**User Input**: "I think I might learn to play the guitar soon. Also, can you make sure your responses are always in markdown?"
+### Example 4: Rejecting Questions While Extracting Personal Facts
+**User Input**: "I work as a data scientist at Microsoft. Can you explain how neural networks work? My daughter Emma is studying computer science at Stanford."
+**Response**:
+[
+  {"operation": "NEW", "content": "User works as a data scientist at Microsoft."},
+  {"operation": "NEW", "content": "User's daughter is named Emma and studies computer science at Stanford."}
+]
+
+### Example 5: Rejecting Questions and General Knowledge
+**User Input**: "Who was the first person to climb Mount Everest? I'm curious about mountaineering history."
+**Response**:
+[]
+
+### Example 6: Rejecting Speculative Content
+**User Input**: "I might learn guitar next year. Maybe I'll take lessons. I'm thinking about getting a Fender."
 **Response**:
 []
 ---
@@ -106,6 +122,8 @@ MEMORY_IDENTIFICATION_PROMPT = """You are a specialized system for extracting an
 ## Final Check
 - **Format Validation**: Is the output a valid JSON array?
 - **Content Standards**: Does every memory `content` start with "User" or "User's"?
+- **Question Filter**: Have ALL questions, inquiries, and requests for information been rejected?
+- **Personal Information Only**: Is all content about the user personally, not their interests in external topics?
 - **Logical Structure**: Are related facts grouped logically and operations correctly linked to existing `id`s?
 - **Factual Filter**: Is all content factual, lasting information about the user's personal life/identity?
 - **Exclusion Compliance**: Have system instructions, temporary states, and speculative content been rejected?
@@ -197,7 +215,7 @@ class Filter:
                 try:
                     logger.info(f"Loading sentence transformer model: {self.valves.embedding_model}")
                     Filter._global_sentence_model = await asyncio.to_thread(
-                        SentenceTransformer, self.valves.embedding_model
+                        SentenceTransformer, self.valves.embedding_model, trust_remote_code=True
                     )
                     logger.info("Sentence transformer model loaded successfully")
                 except Exception as e:
@@ -205,7 +223,7 @@ class Filter:
                     try:
                         logger.info("Attempting to load fallback model: all-MiniLM-L6-v2")
                         Filter._global_sentence_model = await asyncio.to_thread(
-                            SentenceTransformer, "all-MiniLM-L6-v2"
+                            SentenceTransformer, "all-MiniLM-L6-v2", trust_remote_code=True
                         )
                         logger.info("Fallback model loaded successfully")
                     except Exception as fallback_error:
