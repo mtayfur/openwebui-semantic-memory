@@ -15,6 +15,7 @@ from sentence_transformers import SentenceTransformer
 from sklearn.metrics.pairwise import cosine_similarity
 import hashlib
 import multiprocessing
+import unicodedata
 
 import aiohttp
 from fastapi.requests import Request
@@ -149,6 +150,9 @@ class Filter:
     
     CACHE_MAX_SIZE = 2000
     
+    SEMANTIC_WEIGHT = 0.8
+    KEYWORD_WEIGHT = 0.2
+    
     class Valves(BaseModel):
         """Configuration valves for the filter"""
 
@@ -195,9 +199,7 @@ class Filter:
         self.user_valves = self.UserValves()
         self._aiohttp_session = None
         
-        # Calculate optimal batch size based on CPU cores
         cpu_count = multiprocessing.cpu_count()
-        # Use 2x CPU cores for batch size, with min 4 and max 32
         self._batch_size = max(4, min(32, cpu_count * 2))
         logger.info(f"Initialized batch processing with size {self._batch_size} (CPU cores: {cpu_count})")
 
@@ -215,7 +217,7 @@ class Filter:
                 try:
                     logger.info(f"Loading sentence transformer model: {self.valves.embedding_model}")
                     Filter._global_sentence_model = await asyncio.to_thread(
-                        SentenceTransformer, self.valves.embedding_model, trust_remote_code=True
+                        SentenceTransformer, self.valves.embedding_model, device="cpu", trust_remote_code=True
                     )
                     logger.info("Sentence transformer model loaded successfully")
                 except Exception as e:
@@ -223,7 +225,7 @@ class Filter:
                     try:
                         logger.info("Attempting to load fallback model: all-MiniLM-L6-v2")
                         Filter._global_sentence_model = await asyncio.to_thread(
-                            SentenceTransformer, "all-MiniLM-L6-v2", trust_remote_code=True
+                            SentenceTransformer, "all-MiniLM-L6-v2", device="cpu", trust_remote_code=True
                         )
                         logger.info("Fallback model loaded successfully")
                     except Exception as fallback_error:
@@ -255,7 +257,6 @@ class Filter:
 
     def _generate_cache_key(self, text: str, user_id: str = None) -> str:
         """Generate a cache key for text embedding."""
-        # Use text content and model name for cache key
         cache_content = f"{text}|{self.valves.embedding_model}"
         if user_id:
             cache_content = f"{user_id}|{cache_content}"
@@ -319,7 +320,6 @@ class Filter:
         if not texts:
             return []
         
-        # Separate cached and non-cached texts
         cached_embeddings = {}
         texts_to_process = []
         text_indices = {}
@@ -334,26 +334,21 @@ class Filter:
         
         logger.debug(f"Batch processing: {len(cached_embeddings)} cached, {len(texts_to_process)} to process")
         
-        # Process remaining texts in batches
         new_embeddings = {}
         if texts_to_process:
             try:
                 model = await self._get_sentence_model()
                 
-                # Process in batches for better CPU utilization
                 for batch_start in range(0, len(texts_to_process), self._batch_size):
                     batch_end = min(batch_start + self._batch_size, len(texts_to_process))
                     batch_texts = texts_to_process[batch_start:batch_end]
                     
-                    # Generate embeddings for the batch
                     batch_embeddings = await asyncio.to_thread(model.encode, batch_texts)
                     
-                    # Store results and cache them
                     for j, embedding in enumerate(batch_embeddings):
                         original_index = text_indices[batch_start + j]
                         new_embeddings[original_index] = embedding
                         
-                        # Cache the embedding
                         await self._cache_embedding(batch_texts[j], embedding, user_id)
                 
                 logger.debug(f"Generated {len(new_embeddings)} new embeddings in batches of {self._batch_size}")
@@ -362,7 +357,6 @@ class Filter:
                 logger.error(f"Error in batch embedding generation: {e}")
                 raise
         
-        # Combine cached and new embeddings in original order
         result = []
         for i in range(len(texts)):
             if i in cached_embeddings:
@@ -744,15 +738,44 @@ class Filter:
 
     async def _calculate_memory_similarity(self, text1: str, text2: str, user_id: str = None) -> float:
         """Calculate semantic similarity between two strings using cached sentence transformers."""
+        normalized_text1 = self._normalize_text(text1)
+        normalized_text2 = self._normalize_text(text2)
+        
         try:
-            embedding1 = await self._get_embedding_with_cache(text1, user_id)
-            embedding2 = await self._get_embedding_with_cache(text2, user_id)
+            embedding1 = await self._get_embedding_with_cache(normalized_text1, user_id)
+            embedding2 = await self._get_embedding_with_cache(normalized_text2, user_id)
             
             similarity_matrix = cosine_similarity([embedding1], [embedding2])
             return float(max(0, min(1, similarity_matrix[0][0])))
         except Exception as e:
             logger.warning(f"Error calculating semantic similarity, falling back to string similarity: {e}")
-            return SequenceMatcher(None, text1.lower(), text2.lower()).ratio()
+            return SequenceMatcher(None, normalized_text1, normalized_text2).ratio()
+
+    async def _calculate_weighted_similarity(self, query: str, memory: str, user_id: str = None) -> float:
+        """Calculate weighted similarity using semantic and keyword factors."""
+        semantic_score = await self._calculate_memory_similarity(query, memory, user_id)
+        
+        normalized_query = self._normalize_text(query)
+        normalized_memory = self._normalize_text(memory)
+        
+        query_words = set(normalized_query.split()) if normalized_query else set()
+        memory_words = set(normalized_memory.split()) if normalized_memory else set()
+        
+        if query_words:
+            keyword_score = len(query_words & memory_words) / len(query_words)
+        else:
+            keyword_score = 0.0
+        
+        weighted_score = (
+            semantic_score * self.SEMANTIC_WEIGHT + 
+            keyword_score * self.KEYWORD_WEIGHT
+        )
+        
+        total_weight = self.SEMANTIC_WEIGHT + self.KEYWORD_WEIGHT
+        if total_weight > 0:
+            weighted_score = weighted_score / total_weight
+        
+        return min(1.0, max(0.0, weighted_score))
 
     def _calculate_dynamic_threshold(self, scored_memories: List[Dict[str, Any]]) -> float:
         """Calculate a dynamic threshold based on score distribution while maintaining a baseline minimum."""
@@ -777,6 +800,26 @@ class Filter:
         
         return min(dynamic_threshold, 0.95) 
 
+    def _normalize_text(self, text: str) -> str:
+        """Normalize text for better semantic matching with multi-language support."""
+        if not text or not text.strip():
+            return ""
+        
+        normalized = unicodedata.normalize('NFKD', text).lower()
+        try:
+            import contractions
+            normalized = contractions.fix(normalized)
+        except ImportError:
+            pass
+        
+        normalized = ''.join(c for c in normalized if not unicodedata.combining(c))
+        normalized = re.sub(r'^user\'?s?\s+', '', normalized, flags=re.IGNORECASE)
+        
+        normalized = re.sub(r'[^\w\s]', ' ', normalized)
+        normalized = re.sub(r'\s+', ' ', normalized).strip()
+        
+        return normalized
+
     async def get_relevant_memories(
         self, current_message: str, user_id: str
     ) -> List[Dict[str, Any]]:
@@ -785,36 +828,52 @@ class Filter:
         if not existing_memories:
             return []
 
-        # Prepare texts for batch processing
-        memory_texts = [mem["memory"] for mem in existing_memories]
-        all_texts = [current_message] + memory_texts
+        normalized_current_message = self._normalize_text(current_message)
         
-        # Get embeddings in batch (much faster for many memories)
+        memory_texts = [self._normalize_text(mem["memory"]) for mem in existing_memories]
+        all_texts = [normalized_current_message] + memory_texts
+        
         try:
             all_embeddings = await self._get_embeddings_batch(all_texts, user_id)
             current_embedding = all_embeddings[0]
             memory_embeddings = all_embeddings[1:]
         except Exception as e:
-            logger.warning(f"Batch processing failed, falling back to individual processing: {e}")
-            # Fallback to individual processing
+            logger.warning(f"Batch processing failed, fallingback to individual weighted similarity: {e}")
             scored_memories = []
             for mem in existing_memories:
-                similarity = await self._calculate_memory_similarity(
+                weighted_similarity = await self._calculate_weighted_similarity(
                     current_message, mem["memory"], user_id
                 )
-                scored_memories.append({**mem, "relevance": similarity})
+                scored_memories.append({**mem, "relevance": weighted_similarity})
         else:
-            # Calculate similarities using batch embeddings
             scored_memories = []
             for i, mem in enumerate(existing_memories):
                 try:
                     similarity_matrix = cosine_similarity([current_embedding], [memory_embeddings[i]])
-                    similarity = float(max(0, min(1, similarity_matrix[0][0])))
+                    semantic_similarity = float(max(0, min(1, similarity_matrix[0][0])))
+                    
+                    query_words = set(normalized_current_message.split()) if normalized_current_message else set()
+                    memory_words = set(memory_texts[i].split()) if memory_texts[i] else set()
+                    keyword_similarity = len(query_words & memory_words) / len(query_words) if query_words else 0.0
+                    
+                    weighted_score = (
+                        semantic_similarity * self.SEMANTIC_WEIGHT + 
+                        keyword_similarity * self.KEYWORD_WEIGHT
+                    )
+                    
+                    total_weight = self.SEMANTIC_WEIGHT + self.KEYWORD_WEIGHT
+                    if total_weight > 0:
+                        weighted_score = weighted_score / total_weight
+                    
+                    final_score = min(1.0, max(0.0, weighted_score))
+                    
                 except Exception as e:
-                    logger.warning(f"Error calculating similarity for memory {i}, using fallback: {e}")
-                    similarity = SequenceMatcher(None, current_message.lower(), mem["memory"].lower()).ratio()
+                    logger.warning(f"Error calculating weighted similarity for memory {i}, using fallback: {e}")
+                    final_score = await self._calculate_weighted_similarity(
+                        current_message, mem["memory"], user_id
+                    )
                 
-                scored_memories.append({**mem, "relevance": similarity})
+                scored_memories.append({**mem, "relevance": final_score})
 
         scored_memories.sort(key=lambda x: x["relevance"], reverse=True)
         
@@ -829,6 +888,8 @@ class Filter:
 
         cache_stats = await self._get_cache_stats(user_id)
         logger.info(
+            f"Enhanced normalization applied (removed User/User's prefixes for query-memory alignment). "
+            f"Weighted similarity scoring (semantic: {self.SEMANTIC_WEIGHT}, keyword: {self.KEYWORD_WEIGHT}). "
             f"Dynamic threshold: {dynamic_threshold:.3f} (baseline: {self.valves.relevance_threshold:.3f}). "
             f"Found {len(filtered_memories)} relevant memories above threshold. Returning top {len(result)}. "
             f"Cache stats: {cache_stats}"
@@ -855,25 +916,20 @@ class Filter:
             ops_to_execute = []
             existing_contents = {mem["memory"] for mem in existing_memories}
             
-            # Collect all NEW operations for batch processing
             new_operations = [op for op in operations if op["operation"] == "NEW"]
             other_operations = [op for op in operations if op["operation"] != "NEW"]
             
-            # Process NEW operations with batch similarity checking
             if new_operations and existing_contents:
                 try:
-                    # Prepare texts for batch processing
-                    new_contents = [op["content"] for op in new_operations]
-                    existing_list = list(existing_contents)
+                    new_contents = [self._normalize_text(op["content"]) for op in new_operations]
+                    existing_list = [self._normalize_text(content) for content in existing_contents]
                     
-                    # Get embeddings for all new and existing memories
                     all_texts = new_contents + existing_list
                     all_embeddings = await self._get_embeddings_batch(all_texts, user_id)
                     
                     new_embeddings = all_embeddings[:len(new_contents)]
                     existing_embeddings = all_embeddings[len(new_contents):]
                     
-                    # Check each new operation for duplicates
                     for i, op in enumerate(new_operations):
                         is_duplicate = False
                         new_embedding = new_embeddings[i]
@@ -893,12 +949,13 @@ class Filter:
                             
                 except Exception as e:
                     logger.warning(f"Batch duplicate detection failed, falling back to individual: {e}")
-                    # Fallback to individual processing
                     for op in new_operations:
                         is_duplicate = False
+                        normalized_new_content = self._normalize_text(op["content"])
                         for existing_content in existing_contents:
+                            normalized_existing_content = self._normalize_text(existing_content)
                             similarity = await self._calculate_memory_similarity(
-                                op["content"], existing_content, user_id
+                                normalized_new_content, normalized_existing_content, user_id
                             )
                             if similarity >= self.valves.similarity_threshold:
                                 is_duplicate = True
@@ -909,10 +966,8 @@ class Filter:
                         else:
                             ops_to_execute.append(op)
             else:
-                # No existing memories to compare against, add all NEW operations
                 ops_to_execute.extend(new_operations)
             
-            # Add all non-NEW operations (no duplicate checking needed)
             ops_to_execute.extend(other_operations)
             
             logger.debug(
