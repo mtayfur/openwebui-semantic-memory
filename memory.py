@@ -9,7 +9,6 @@ from typing import Any, Awaitable, Callable, Dict, List, Literal, Optional, Unio
 import logging
 import re
 import asyncio
-from difflib import SequenceMatcher
 import numpy as np
 from sentence_transformers import SentenceTransformer
 from sklearn.metrics.pairwise import cosine_similarity
@@ -200,8 +199,7 @@ class Filter:
 
     CACHE_MAX_SIZE = 2000
 
-    SEMANTIC_WEIGHT = 0.8
-    KEYWORD_WEIGHT = 0.2
+
 
     class Valves(BaseModel):
         """Configuration valves for the filter"""
@@ -279,22 +277,9 @@ class Filter:
                     logger.info("Sentence transformer model loaded successfully")
                 except Exception as e:
                     logger.error(f"Failed to load sentence transformer model: {e}")
-                    try:
-                        logger.info(
-                            "Attempting to load fallback model: all-MiniLM-L6-v2"
-                        )
-                        Filter._global_sentence_model = await asyncio.to_thread(
-                            SentenceTransformer,
-                            "all-MiniLM-L6-v2",
-                            device="cpu",
-                            trust_remote_code=True,
-                        )
-                        logger.info("Fallback model loaded successfully")
-                    except Exception as fallback_error:
-                        logger.error(f"Failed to load fallback model: {fallback_error}")
-                        raise RuntimeError(
-                            "Could not load any sentence transformer model"
-                        )
+                    raise RuntimeError(
+                        "Could not load sentence transformer model"
+                    )
         return Filter._global_sentence_model
 
     async def _get_aiohttp_session(self) -> aiohttp.ClientSession:
@@ -491,13 +476,11 @@ class Filter:
                 user_message = body["messages"][-1]["content"]
                 user_id = __user__["id"]
 
-                # Check if this is the first user message in the conversation
                 user_messages = [
                     msg for msg in body["messages"] if msg["role"] == "user"
                 ]
                 is_first_message = len(user_messages) == 1
 
-                # Enhance query only for the first message
                 if is_first_message:
                     await self._emit_status(
                         __event_emitter__,
@@ -524,9 +507,15 @@ class Filter:
                         __event_emitter__, f"💡 Found {count} relevant {memory_word}"
                     )
                 else:
-                    await self._emit_status(
-                        __event_emitter__, "💭 No relevant memories found"
-                    )
+                    normalized_query = self._normalize_text(enhanced_query)
+                    if not self._is_query_meaningful(normalized_query):
+                        await self._emit_status(
+                            __event_emitter__, f"💭 Query too short for memory"
+                        )
+                    else:
+                        await self._emit_status(
+                            __event_emitter__, "💭 No relevant memories found"
+                        )
 
                 if relevant_memories:
                     self._inject_memories_into_context(body, relevant_memories)
@@ -730,29 +719,44 @@ class Filter:
         try:
             logger.debug(f"Processing memories for message: {user_message[:50]}...")
             existing_memories = await self._get_formatted_memories(user_id)
-            operations = await self.identify_memory_operations(
+            operations, validation_info = await self.identify_memory_operations(
                 user_message, existing_memories
             )
 
             if operations:
                 logger.info(f"Found {len(operations)} memory operations to process.")
-                executed_ops = await self.execute_memory_operations(
+                executed_ops, skipped_info = await self.execute_memory_operations(
                     operations, user_id, existing_memories
                 )
 
                 if executed_ops:
                     status_message = self._format_operation_status(executed_ops)
+                    if skipped_info["duplicates"] > 0:
+                        status_message += f" | 💡 Skipped {skipped_info['duplicates']} duplicates"
                     await self._emit_status(__event_emitter__, status_message)
+                elif skipped_info["duplicates"] > 0:
+                    await self._emit_status(
+                        __event_emitter__, f"💡 Skipped {skipped_info['duplicates']} duplicate memories"
+                    )
+                elif skipped_info["db_errors"] > 0:
+                    await self._emit_status(
+                        __event_emitter__, f"🙈 Failed to execute {skipped_info['db_errors']} operations (database errors)"
+                    )
                 else:
                     await self._emit_status(
                         __event_emitter__, "🙈 Failed to update memories"
                     )
                 return executed_ops
             else:
-                logger.debug("No new memory operations identified.")
-                await self._emit_status(
-                    __event_emitter__, "💭 No memorable facts found"
-                )
+                if validation_info["validation_failed"] > 0:
+                    await self._emit_status(
+                        __event_emitter__, f"⚠️ Skipped {validation_info['validation_failed']} invalid operations"
+                    )
+                else:
+                    logger.debug("No new memory operations identified.")
+                    await self._emit_status(
+                        __event_emitter__, "💭 No memorable facts found"
+                    )
             return []
         except asyncio.CancelledError:
             logger.info("Memory processing task was cancelled")
@@ -803,20 +807,22 @@ class Filter:
 
         logger.info(f"Parsed {len(operations)} operations from LLM response")
 
-        valid_ops = [
-            op
-            for op in operations
-            if self._validate_memory_operation(op, existing_memories)
-        ]
+        valid_ops = []
+        validation_failed_count = 0
+        
+        for op in operations:
+            if self._validate_memory_operation(op, existing_memories):
+                valid_ops.append(op)
+            else:
+                validation_failed_count += 1
 
-        rejected_count = len(operations) - len(valid_ops)
-        if rejected_count > 0:
+        if validation_failed_count > 0:
             logger.info(
-                f"Rejected {rejected_count} invalid memory operations (validation failed)"
+                f"Rejected {validation_failed_count} invalid memory operations (validation failed)"
             )
 
         logger.info(f"Identified {len(valid_ops)} valid memory operations.")
-        return valid_ops
+        return valid_ops, {"validation_failed": validation_failed_count}
 
     def _validate_memory_operation(
         self, op: Dict[str, Any], existing_memories: List[Dict[str, Any]]
@@ -881,7 +887,7 @@ class Filter:
     async def _calculate_memory_similarity(
         self, text1: str, text2: str, user_id: str = None
     ) -> float:
-        """Calculate semantic similarity between two strings using cached sentence transformers."""
+        """Calculate semantic similarity between two strings using sentence transformers."""
         normalized_text1 = self._normalize_text(text1)
         normalized_text2 = self._normalize_text(text2)
 
@@ -890,64 +896,52 @@ class Filter:
             embedding2 = await self._get_embedding_with_cache(normalized_text2, user_id)
 
             similarity_matrix = cosine_similarity([embedding1], [embedding2])
-            return float(max(0, min(1, similarity_matrix[0][0])))
+            similarity_score = float(max(0, min(1, similarity_matrix[0][0])))
+            
+            logger.debug(f"Semantic similarity calculated: {similarity_score:.3f}")
+            return similarity_score
         except Exception as e:
-            logger.warning(
-                f"Error calculating semantic similarity, falling back to string similarity: {e}"
-            )
-            return SequenceMatcher(None, normalized_text1, normalized_text2).ratio()
+            logger.error(f"Error calculating semantic similarity: {e}")
+            raise
 
-    async def _calculate_weighted_similarity(
-        self, query: str, memory: str, user_id: str = None
-    ) -> float:
-        """Calculate weighted similarity using semantic and keyword factors."""
-        semantic_score = await self._calculate_memory_similarity(query, memory, user_id)
 
-        normalized_query = self._normalize_text(query)
-        normalized_memory = self._normalize_text(memory)
-
-        query_words = set(normalized_query.split()) if normalized_query else set()
-        memory_words = set(normalized_memory.split()) if normalized_memory else set()
-
-        if query_words:
-            keyword_score = len(query_words & memory_words) / len(query_words)
-        else:
-            keyword_score = 0.0
-
-        weighted_score = (
-            semantic_score * self.SEMANTIC_WEIGHT + keyword_score * self.KEYWORD_WEIGHT
-        )
-
-        total_weight = self.SEMANTIC_WEIGHT + self.KEYWORD_WEIGHT
-        if total_weight > 0:
-            weighted_score = weighted_score / total_weight
-
-        return min(1.0, max(0.0, weighted_score))
 
     def _calculate_dynamic_threshold(
         self, scored_memories: List[Dict[str, Any]]
     ) -> float:
-        """Calculate a dynamic threshold based on score distribution while maintaining a baseline minimum."""
+        """
+        Calculate a dynamic threshold for semantic similarity using median-based approach:
+        - Uses median mean for more robust threshold calculation
+        - Always clipped to [min, max] bounds
+        """
         if not scored_memories:
             return self.valves.relevance_threshold
 
-        baseline_threshold = self.valves.relevance_threshold
+        min_threshold = self.valves.relevance_threshold
+        max_threshold = self.valves.similarity_threshold
         scores = [mem["relevance"] for mem in scored_memories]
 
         if len(scores) <= self.valves.related_memories_n:
-            return baseline_threshold
+            return min_threshold
 
         top_n_scores = scores[: self.valves.related_memories_n]
-        avg_top_n = sum(top_n_scores) / len(top_n_scores)
+        
+        sorted_top_n = sorted(top_n_scores)
+        n = len(sorted_top_n)
+        if n % 2 == 0:
+            median_top_n = (sorted_top_n[n // 2 - 1] + sorted_top_n[n // 2]) / 2
+        else:
+            median_top_n = sorted_top_n[n // 2]
+        
         max_score = max(scores)
 
-        dynamic_threshold = max(baseline_threshold, avg_top_n - 0.05)
+        dynamic_threshold = max(min_threshold, median_top_n - 0.05)
 
-        score_gap = max_score - avg_top_n
+        score_gap = max_score - median_top_n
         if score_gap > 0.2:
-            dynamic_threshold = max(baseline_threshold, avg_top_n + 0.05)
+            dynamic_threshold = max(min_threshold, median_top_n + 0.05)
 
-        return min(dynamic_threshold, 0.95)
+        return max(min(dynamic_threshold, max_threshold), min_threshold)
 
     def _normalize_text(self, text: str) -> str:
         """Normalize text for better semantic matching with multi-language support."""
@@ -955,30 +949,34 @@ class Filter:
             return ""
 
         normalized = unicodedata.normalize("NFKD", text).lower()
-        try:
-            import contractions
-
-            normalized = contractions.fix(normalized)
-        except ImportError:
-            pass
-
         normalized = "".join(c for c in normalized if not unicodedata.combining(c))
         normalized = re.sub(r"^user\'?s?\s+", "", normalized, flags=re.IGNORECASE)
-
         normalized = re.sub(r"[^\w\s]", " ", normalized)
         normalized = re.sub(r"\s+", " ", normalized).strip()
 
         return normalized
 
+    def _is_query_meaningful(self, text: str) -> bool:
+        """Check if query has sufficient length to be meaningful for memory search."""
+        if not text or not text.strip():
+            return False
+        
+        return len(text.strip()) >= 10
+
     async def get_relevant_memories(
         self, current_message: str, user_id: str
     ) -> List[Dict[str, Any]]:
-        """Get memories relevant to the current context using cached sentence similarity with dynamic threshold."""
+        """Get memories relevant to the current context using semantic similarity."""
         existing_memories = await self._get_formatted_memories(user_id)
         if not existing_memories:
+            logger.info("No existing memories found for user")
             return []
 
         normalized_current_message = self._normalize_text(current_message)
+        
+        if not self._is_query_meaningful(normalized_current_message):
+            logger.info(f"Query too short for meaningful search (length: {len(normalized_current_message.strip())} chars, minimum: 8)")
+            return []
 
         memory_texts = [
             self._normalize_text(mem["memory"]) for mem in existing_memories
@@ -989,59 +987,23 @@ class Filter:
             all_embeddings = await self._get_embeddings_batch(all_texts, user_id)
             current_embedding = all_embeddings[0]
             memory_embeddings = all_embeddings[1:]
-        except Exception as e:
-            logger.warning(
-                f"Batch processing failed, fallingback to individual weighted similarity: {e}"
-            )
-            scored_memories = []
-            for mem in existing_memories:
-                weighted_similarity = await self._calculate_weighted_similarity(
-                    current_message, mem["memory"], user_id
-                )
-                scored_memories.append({**mem, "relevance": weighted_similarity})
-        else:
+            
             scored_memories = []
             for i, mem in enumerate(existing_memories):
-                try:
-                    similarity_matrix = cosine_similarity(
-                        [current_embedding], [memory_embeddings[i]]
-                    )
-                    semantic_similarity = float(max(0, min(1, similarity_matrix[0][0])))
-
-                    query_words = (
-                        set(normalized_current_message.split())
-                        if normalized_current_message
-                        else set()
-                    )
-                    memory_words = (
-                        set(memory_texts[i].split()) if memory_texts[i] else set()
-                    )
-                    keyword_similarity = (
-                        len(query_words & memory_words) / len(query_words)
-                        if query_words
-                        else 0.0
-                    )
-
-                    weighted_score = (
-                        semantic_similarity * self.SEMANTIC_WEIGHT
-                        + keyword_similarity * self.KEYWORD_WEIGHT
-                    )
-
-                    total_weight = self.SEMANTIC_WEIGHT + self.KEYWORD_WEIGHT
-                    if total_weight > 0:
-                        weighted_score = weighted_score / total_weight
-
-                    final_score = min(1.0, max(0.0, weighted_score))
-
-                except Exception as e:
-                    logger.warning(
-                        f"Error calculating weighted similarity for memory {i}, using fallback: {e}"
-                    )
-                    final_score = await self._calculate_weighted_similarity(
-                        current_message, mem["memory"], user_id
-                    )
-
-                scored_memories.append({**mem, "relevance": final_score})
+                similarity_matrix = cosine_similarity(
+                    [current_embedding], [memory_embeddings[i]]
+                )
+                semantic_similarity = float(max(0, min(1, similarity_matrix[0][0])))
+                scored_memories.append({**mem, "relevance": semantic_similarity})
+                
+        except Exception as e:
+            logger.error(f"Batch embedding processing failed: {e}")
+            scored_memories = []
+            for mem in existing_memories:
+                semantic_similarity = await self._calculate_memory_similarity(
+                    current_message, mem["memory"], user_id
+                )
+                scored_memories.append({**mem, "relevance": semantic_similarity})
 
         scored_memories.sort(key=lambda x: x["relevance"], reverse=True)
 
@@ -1053,14 +1015,23 @@ class Filter:
 
         result = filtered_memories[: self.valves.related_memories_n]
 
+        if result:
+            sorted_scores = sorted([mem["relevance"] for mem in result])
+            n = len(sorted_scores)
+            if n % 2 == 0:
+                median_score = (sorted_scores[n // 2 - 1] + sorted_scores[n // 2]) / 2
+            else:
+                median_score = sorted_scores[n // 2]
+            
+            score_range = f"{result[-1]['relevance']:.1%} - {result[0]['relevance']:.1%}"
+            logger.info(f"Found {len(result)} relevant memories with semantic scores {score_range} (median: {median_score:.1%}, threshold: {dynamic_threshold:.1%})")
+        else:
+            max_score = max(scored_memories, key=lambda x: x["relevance"])["relevance"] if scored_memories else 0
+            logger.info(f"No memories met median-based threshold {dynamic_threshold:.1%} (best score: {max_score:.1%})")
+
         cache_stats = await self._get_cache_stats(user_id)
-        logger.info(
-            f"Enhanced normalization applied (removed User/User's prefixes for query-memory alignment). "
-            f"Weighted similarity scoring (semantic: {self.SEMANTIC_WEIGHT}, keyword: {self.KEYWORD_WEIGHT}). "
-            f"Dynamic threshold: {dynamic_threshold:.3f} (baseline: {self.valves.relevance_threshold:.3f}). "
-            f"Found {len(filtered_memories)} relevant memories above threshold. Returning top {len(result)}. "
-            f"Cache stats: {cache_stats}"
-        )
+        logger.debug(f"Cache stats: {cache_stats}")
+        
         return result
 
     async def execute_memory_operations(
@@ -1068,16 +1039,18 @@ class Filter:
         operations: List[Dict[str, Any]],
         user_id: str,
         existing_memories: List[Dict[str, Any]],
-    ) -> List[Dict[str, Any]]:
+    ) -> tuple:
         """Execute a list of memory operations (NEW, UPDATE, DELETE)."""
         executed_operations = []
+        skipped_info = {"duplicates": 0, "validation_failed": 0, "db_errors": 0}
+        
         try:
             user = await asyncio.wait_for(
                 asyncio.to_thread(Users.get_user_by_id, user_id), timeout=5.0
             )
             if not user:
                 logger.error(f"User not found: {user_id}")
-                return executed_operations
+                return executed_operations, skipped_info
 
             ops_to_execute = []
             existing_contents = {mem["memory"] for mem in existing_memories}
@@ -1114,18 +1087,16 @@ class Filter:
 
                             if similarity >= self.valves.similarity_threshold:
                                 is_duplicate = True
+                                skipped_info["duplicates"] += 1
+                                logger.debug(f"Skipped duplicate memory with similarity {similarity:.1%}: {op['content'][:50]}...")
                                 break
 
-                        if is_duplicate:
-                            logger.debug(
-                                f"Skipping duplicate new memory: {op['content'][:50]}..."
-                            )
-                        else:
+                        if not is_duplicate:
                             ops_to_execute.append(op)
 
                 except Exception as e:
                     logger.warning(
-                        f"Batch duplicate detection failed, falling back to individual: {e}"
+                        f"Batch duplicate detection failed, falling back to individual processing: {e}"
                     )
                     for op in new_operations:
                         is_duplicate = False
@@ -1141,13 +1112,11 @@ class Filter:
                             )
                             if similarity >= self.valves.similarity_threshold:
                                 is_duplicate = True
+                                skipped_info["duplicates"] += 1
+                                logger.debug(f"Skipped duplicate memory with similarity {similarity:.1%}: {op['content'][:50]}...")
                                 break
 
-                        if is_duplicate:
-                            logger.debug(
-                                f"Skipping duplicate new memory: {op['content'][:50]}..."
-                            )
-                        else:
+                        if not is_duplicate:
                             ops_to_execute.append(op)
             else:
                 ops_to_execute.extend(new_operations)
@@ -1164,21 +1133,30 @@ class Filter:
                 )
                 if success:
                     executed_operations.append(op_data)
+                else:
+                    skipped_info["db_errors"] += 1
 
-            logger.info(
-                f"Successfully processed {len(executed_operations)} memory operations."
-            )
-            return executed_operations
+            if executed_operations:
+                logger.info(f"Successfully processed {len(executed_operations)} memory operations.")
+            
+            if skipped_info["duplicates"] > 0:
+                logger.info(f"Skipped {skipped_info['duplicates']} duplicate memories")
+                
+            if skipped_info["db_errors"] > 0:
+                logger.warning(f"Failed to execute {skipped_info['db_errors']} operations due to database errors")
+                
+            return executed_operations, skipped_info
+            
         except asyncio.TimeoutError:
             logger.error(
                 f"Database timeout while processing memory operations for user {user_id}"
             )
-            return executed_operations
+            return executed_operations, skipped_info
         except Exception as e:
             logger.error(
                 f"Error processing memories for user {user_id}: {e}\n{traceback.format_exc()}"
             )
-            return executed_operations
+            return executed_operations, skipped_info
 
     async def _execute_single_operation(
         self, operation: MemoryOperation, user: Any
