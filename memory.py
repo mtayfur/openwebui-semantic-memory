@@ -5,7 +5,7 @@ title: Neural Recall
 import json
 import traceback
 from datetime import datetime, timezone, timedelta
-from typing import Any, Awaitable, Callable, Dict, List, Literal, Optional, Union
+from typing import Any, Awaitable, Callable, Dict, List, Literal, Optional, Union, Tuple
 import logging
 import re
 import asyncio
@@ -474,7 +474,13 @@ class Filter:
 
         try:
             if "messages" in body and body["messages"]:
-                user_message = body["messages"][-1]["content"]
+                last_user_msg = next(
+                    (m["content"] for m in reversed(body.get("messages", [])) if m.get("role") == "user"),
+                    None,
+                )
+                if not last_user_msg:
+                    return body
+                user_message = last_user_msg
                 user_id = __user__["id"]
 
                 user_messages = [
@@ -511,7 +517,7 @@ class Filter:
                     normalized_query = self._normalize_text(enhanced_query)
                     if not self._is_query_meaningful(normalized_query):
                         await self._emit_status(
-                            __event_emitter__, f"💭 Query too short for memory"
+                            __event_emitter__, f"💭 Query too short for memory ({len(normalized_query)} < 10)"
                         )
                     else:
                         await self._emit_status(
@@ -772,7 +778,7 @@ class Filter:
         self,
         input_text: str,
         existing_memories: List[Dict[str, Any]],
-    ) -> List[Dict[str, Any]]:
+    ) -> tuple[List[Dict[str, Any]], Dict[str, int]]:
         """Use an LLM to identify memory operations from the input text."""
         logger.debug("Starting memory identification.")
         system_prompt = MEMORY_IDENTIFICATION_PROMPT
@@ -789,7 +795,7 @@ class Filter:
         response = await self._query_llm(system_prompt, input_text)
         if not response or response.startswith("Error:"):
             logger.error(f"Error from LLM during memory identification: {response}")
-            return []
+            return [], {"validation_failed": 0}
 
         logger.info(f"LLM response for memory identification: {response}")
         operations = self._extract_and_parse_json(response)
@@ -798,7 +804,7 @@ class Filter:
             logger.warning(
                 f"LLM did not return a valid list of operations: {operations}"
             )
-            return []
+            return [], {"validation_failed": 0}
 
         logger.info(f"Parsed {len(operations)} operations from LLM response")
 
@@ -866,11 +872,11 @@ class Filter:
             pass
 
         for pattern in [
-            r'(\[[\s\S]*\])',
-            r'(\{[\s\S]*\})' 
+            r'(\[[\s\S]*?\])',
+            r'(\{[\s\S]*?\})'  
         ]:
-            matches = re.finditer(pattern, text)
-            for match in matches:
+            match = re.search(pattern, text)
+            if match:
                 json_text = match.group(1)
                 try:
                     result = json.loads(json_text)
@@ -909,7 +915,7 @@ class Filter:
     ) -> float:
         """
         Calculate a dynamic threshold for semantic similarity using median-based approach:
-        - Uses median mean for more robust threshold calculation
+        - Uses median-based threshold for more robust threshold calculation
         - Always clipped to [min, max] bounds
         """
         if not scored_memories:
@@ -1037,14 +1043,14 @@ class Filter:
         operations: List[Dict[str, Any]],
         user_id: str,
         existing_memories: List[Dict[str, Any]],
-    ) -> tuple:
+    ) -> Tuple[List[Dict[str, Any]], Dict[str, int]]:
         """Execute a list of memory operations (NEW, UPDATE, DELETE)."""
         executed_operations = []
         skipped_info = {"duplicates": 0, "validation_failed": 0, "db_errors": 0}
         
         try:
             user = await asyncio.wait_for(
-                asyncio.to_thread(Users.get_user_by_id, user_id), timeout=5.0
+                asyncio.to_thread(Users.get_user_by_id, str(user_id)), timeout=5.0
             )
             if not user:
                 logger.error(f"User not found: {user_id}")
@@ -1173,6 +1179,7 @@ class Filter:
                     timeout=10.0,
                 )
                 logger.info(f"NEW memory created: {operation.content[:50]}...")
+                return True
 
             elif operation.operation == "UPDATE" and operation.id:
                 await asyncio.wait_for(
@@ -1189,14 +1196,18 @@ class Filter:
                 logger.info(
                     f"UPDATE memory {operation.id}: {operation.content[:50]}..."
                 )
+                return True
 
             elif operation.operation == "DELETE" and operation.id:
                 await asyncio.wait_for(
                     delete_memory_by_id(operation.id, user=user), timeout=5.0
                 )
                 logger.info(f"DELETE memory {operation.id}")
-
-            return True
+                return True
+            
+            else:
+                logger.warning(f"Unsupported or invalid operation payload: {operation}")
+                return False
         except asyncio.TimeoutError:
             logger.error(
                 f"Database timeout executing {operation.operation} for ID {operation.id}"
@@ -1253,7 +1264,21 @@ class Filter:
                                     "content": {"type": "string"}
                                 },
                                 "required": ["operation"],
-                                "additionalProperties": False
+                                "additionalProperties": False,
+                                "allOf": [
+                                    {
+                                        "if": {"properties": {"operation": {"const": "NEW"}}},
+                                        "then": {"required": ["content"]}
+                                    },                                    
+                                    {
+                                        "if": {"properties": {"operation": {"const": "UPDATE"}}},
+                                        "then": {"required": ["id", "content"]}
+                                    },
+                                    {
+                                        "if": {"properties": {"operation": {"const": "DELETE"}}},
+                                        "then": {"required": ["id"]}
+                                    }
+                                ]
                             }
                         }
                     }
