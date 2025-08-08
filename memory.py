@@ -141,13 +141,14 @@ QUERY_ENHANCEMENT_PROMPT = """You are a specialized system for enhancing user qu
 - **Preserve Key Details**: Keep names, relationships, organizations, dates, and technical terms.
 - **Translate to English**: Output must always be in English, regardless of input language.
 - **Output Only**: Respond with the enhanced query only—no explanations, markdown, or extra text.
+- **Minimum Length**: The enhanced query must be at least 10 characters long.
 
 ## Enhancement Criteria
 ### DO:
 - **Emphasize Relationships**: Highlight family, friends, colleagues, and their roles.
 - **Include Specifics**: Names, places, organizations, time periods, and technical terms.
 - **Clarify Temporal Context**: Retain references to dates, years, or periods if relevant.
-- **Condense**: Make the query as short as possible while preserving meaning.
+- **Condense**: Make the query as short as possible while preserving meaning, but always at least 10 characters.
 
 ### DO NOT:
 - **Include Questions**: Remove all question forms and requests for information.
@@ -175,7 +176,7 @@ QUERY_ENHANCEMENT_PROMPT = """You are a specialized system for enhancing user qu
 
 ---
 ## Final Check
-- **Is the output a concise, English phrase?**
+- **Is the output a concise, English phrase at least 10 characters long?**
 - **Are all key names, relationships, and facts preserved?**
 - **Is all chit-chat, questioning, and filler removed?**
 - **Is the output free of explanations or formatting?**
@@ -793,12 +794,6 @@ class Filter:
         logger.info(f"LLM response for memory identification: {response}")
         operations = self._extract_and_parse_json(response)
 
-        if isinstance(operations, dict):
-            logger.info(
-                f"LLM returned single operation object, converting to list: {operations}"
-            )
-            operations = [operations]
-
         if not isinstance(operations, list):
             logger.warning(
                 f"LLM did not return a valid list of operations: {operations}"
@@ -863,23 +858,26 @@ class Filter:
         if match:
             text = match.group(1)
 
-        for start_char, end_char in [("[", "]"), ("{", "}")]:
-            start_idx = text.find(start_char)
-            if start_idx != -1:
-                bracket_count = 0
-                for i, char in enumerate(text[start_idx:], start_idx):
-                    if char == start_char:
-                        bracket_count += 1
-                    elif char == end_char:
-                        bracket_count -= 1
-                        if bracket_count == 0:
-                            json_text = text[start_idx : i + 1]
-                            try:
-                                result = json.loads(json_text)
-                                logger.info(f"Successfully parsed JSON: {type(result)}")
-                                return result
-                            except json.JSONDecodeError:
-                                continue
+        try:
+            result = json.loads(text.strip())
+            logger.info(f"Successfully parsed JSON: {type(result)}")
+            return result
+        except json.JSONDecodeError:
+            pass
+
+        for pattern in [
+            r'(\[[\s\S]*\])',
+            r'(\{[\s\S]*\})' 
+        ]:
+            matches = re.finditer(pattern, text)
+            for match in matches:
+                json_text = match.group(1)
+                try:
+                    result = json.loads(json_text)
+                    logger.info(f"Successfully parsed JSON: {type(result)}")
+                    return result
+                except json.JSONDecodeError:
+                    continue
 
         logger.error(f"Failed to parse JSON from: {original_text[:500]}...")
         return None
@@ -975,7 +973,7 @@ class Filter:
         normalized_current_message = self._normalize_text(current_message)
         
         if not self._is_query_meaningful(normalized_current_message):
-            logger.info(f"Query too short for meaningful search (length: {len(normalized_current_message.strip())} chars, minimum: 8)")
+            logger.info(f"Query too short for meaningful search (length: {len(normalized_current_message.strip())} chars, minimum: 10)")
             return []
 
         memory_texts = [
@@ -1235,10 +1233,31 @@ class Filter:
                 ],
                 "temperature": 0.2,
                 "top_p": 0.8,
-                "max_tokens": 4096,
+                "max_tokens": 2048,
             }
             if json_response:
-                payload["response_format"] = {"type": "json_object"}
+                payload["response_format"] = {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "memory_operations",
+                        "schema": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "operation": {
+                                        "type": "string",
+                                        "enum": ["NEW", "UPDATE", "DELETE"]
+                                    },
+                                    "id": {"type": "string"},
+                                    "content": {"type": "string"}
+                                },
+                                "required": ["operation"],
+                                "additionalProperties": False
+                            }
+                        }
+                    }
+                }
 
             async with session.post(url, json=payload, headers=headers) as response:
                 response.raise_for_status()
