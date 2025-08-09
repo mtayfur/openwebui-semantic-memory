@@ -222,11 +222,11 @@ class Filter:
             description="Number of most relevant memories to inject into the context.",
         )
         relevance_threshold: float = Field(
-            default=0.45,
+            default=0.6,
             description="Baseline minimum similarity score (0-1) for a memory to be considered relevant enough to be injected.",
         )
         similarity_threshold: float = Field(
-            default=0.90,
+            default=0.9,
             description="Similarity threshold (0-1) for detecting and preventing duplicate memories.",
         )
         embedding_model: str = Field(
@@ -916,36 +916,37 @@ class Filter:
         """
         Calculate a dynamic threshold for semantic similarity using median-based approach:
         - Uses median-based threshold for more robust threshold calculation
-        - Always clipped to [min, max] bounds
+        - Dynamic range: [relevance_threshold - 0.1, similarity_threshold - 0.1]
         """
         if not scored_memories:
             return self.valves.relevance_threshold
 
-        min_threshold = self.valves.relevance_threshold
-        max_threshold = self.valves.similarity_threshold
+        min_dynamic_threshold = max(0.0, self.valves.relevance_threshold - 0.1)
+        max_dynamic_threshold = min(1.0, self.valves.similarity_threshold - 0.1)
+
         scores = [mem["relevance"] for mem in scored_memories]
 
         if len(scores) <= self.valves.related_memories_n:
-            return min_threshold
+            return self.valves.relevance_threshold
 
         top_n_scores = scores[: self.valves.related_memories_n]
-        
+
         sorted_top_n = sorted(top_n_scores)
         n = len(sorted_top_n)
         if n % 2 == 0:
             median_top_n = (sorted_top_n[n // 2 - 1] + sorted_top_n[n // 2]) / 2
         else:
             median_top_n = sorted_top_n[n // 2]
-        
+
         max_score = max(scores)
 
-        dynamic_threshold = max(min_threshold, median_top_n - 0.05)
+        dynamic_threshold = max(min_dynamic_threshold, median_top_n - 0.05)
 
         score_gap = max_score - median_top_n
         if score_gap > 0.2:
-            dynamic_threshold = max(min_threshold, median_top_n + 0.05)
+            dynamic_threshold = max(min_dynamic_threshold, median_top_n + 0.05)
 
-        return max(min(dynamic_threshold, max_threshold), min_threshold)
+        return min(max(dynamic_threshold, min_dynamic_threshold), max_dynamic_threshold)
 
     def _normalize_text(self, text: str) -> str:
         """Normalize text for better semantic matching with multi-language support."""
