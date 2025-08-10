@@ -141,14 +141,15 @@ QUERY_ENHANCEMENT_PROMPT = """You are a specialized system for enhancing user qu
 - **Preserve Key Details**: Keep names, relationships, organizations, dates, and technical terms.
 - **Translate to English**: Output must always be in English, regardless of input language.
 - **Output Only**: Respond with the enhanced query only—no explanations, markdown, or extra text.
-- **Minimum Length**: The enhanced query must be at least 10 characters long.
+- **Minimum Length**: The enhanced query must be at least 15 characters long to ensure meaningful search after normalization.
 
 ## Enhancement Criteria
 ### DO:
 - **Emphasize Relationships**: Highlight family, friends, colleagues, and their roles.
 - **Include Specifics**: Names, places, organizations, time periods, and technical terms.
 - **Clarify Temporal Context**: Retain references to dates, years, or periods if relevant.
-- **Condense**: Make the query as short as possible while preserving meaning, but always at least 10 characters.
+- **Add Descriptive Context**: Include additional descriptive words to ensure the query remains meaningful after processing.
+- **Condense**: Make the query concise while preserving meaning, but always at least 15 characters.
 
 ### DO NOT:
 - **Include Questions**: Remove all question forms and requests for information.
@@ -160,7 +161,7 @@ QUERY_ENHANCEMENT_PROMPT = """You are a specialized system for enhancing user qu
 
 ### Example 1
 **Original**: "Can you remind me what my son Leo's favorite sport is?"
-**Enhanced**: "user's son Leo favorite sport"
+**Enhanced**: "user's son Leo favorite sport activity"
 
 ### Example 2
 **Original**: "Last year, my sister and I went to Paris for a conference. What was the topic?"
@@ -172,11 +173,11 @@ QUERY_ENHANCEMENT_PROMPT = """You are a specialized system for enhancing user qu
 
 ### Example 4
 **Original**: "Who is my manager at work?"
-**Enhanced**: "user's manager at work"
+**Enhanced**: "user's manager at work position"
 
 ---
 ## Final Check
-- **Is the output a concise, English phrase at least 10 characters long?**
+- **Is the output a concise, English phrase at least 15 characters long?**
 - **Are all key names, relationships, and facts preserved?**
 - **Is all chit-chat, questioning, and filler removed?**
 - **Is the output free of explanations or formatting?**
@@ -965,7 +966,6 @@ class Filter:
         """Check if query has sufficient length to be meaningful for memory search."""
         if not text or not text.strip():
             return False
-        
         return len(text.strip()) >= 10
 
     async def get_relevant_memories(
