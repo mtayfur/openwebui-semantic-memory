@@ -20,6 +20,7 @@ Cache Statistics Logging:
 import asyncio
 import hashlib
 import json
+import string
 import multiprocessing
 import re
 import time
@@ -120,12 +121,12 @@ class Config:
     ]
 
     STRUCTURED_DATA_PATTERNS = [
-        r'^\s*[\{\[]...[\}\]]\s*$',
-        r'^\s*<[^>]+>[\s\S]*</[^>]+>\s*$',
-        r'^\s*\|[^|]+\|[^|]+\|',
-        r'^\s*[-\*\+]\s+.+(\n\s*[-\*\+]\s+.+){3,}',
-        r'^\s*\d+\.\s+.+(\n\s*\d+\.\s+.+){3,}',
-        r'^\s*[A-Za-z0-9_]+:\s*.+(\n\s*[A-Za-z0-9_]+:\s*.+){3,}',
+        r'^\s*[\{\[]...[\}\]]\s*$',                                  # literal "..."
+        r'^\s*<[^>]+>[\s\S]*</[^>]+>\s*$',                            # xml/html-ish
+        r'^\s*\|[^|]+\|[^|]+\|',                                      # markdown tables
+        r'^\s*[-\*\+]\s+.+(\n\s*[-\*\+]\s+.+){3,}',                   # long bullet lists
+        r'^\s*\d+\.\s+.+(\n\s*\d+\.\s+.+){3,}',                       # long ordered lists
+        r'^\s*[A-Za-z0-9_]+:\s+\S+(\n\s*[A-Za-z0-9_]+:\s+\S+){3,}',   # yaml-ish (space after colon)
     ]
 
     STATUS_MESSAGES = {
@@ -138,7 +139,10 @@ class Config:
         'SKIP_TOO_LONG': 'message too long',
         'SKIP_CODE': 'detected code content',
         'SKIP_STRUCTURED': 'detected structured data',
-        'SKIP_SYMBOLS': 'message mostly symbols/numbers'
+        'SKIP_SYMBOLS': 'message mostly symbols/numbers',
+        'SKIP_LOGS': 'detected log dump',
+        'SKIP_STACKTRACE': 'detected stack trace',
+        'SKIP_URL_DUMP': 'detected url dump',
     }
 
 MEMORY_IDENTIFICATION_PROMPT = """You are a Personal Information Structuring Agent. Your mission is to analyze user messages and convert explicitly stated personal facts into a structured JSON array of memory operations. You must operate with absolute precision and adherence to the following principles and rules.
@@ -709,18 +713,42 @@ class Filter:
             logger.error(f"Failed to log cache performance [{context}]: {e}")
 
     def _should_enhance_query(self, query: str) -> bool:
-        """Decide if LLM enhancement is needed based on enhanced criteria."""
+        """
+        Decide if LLM enhancement is worthwhile (structure-only).
+        Enhance for multi-part, time-rich, or entity-rich natural inputs.
+        Avoid dumps, code, very short, or symbol-noise.
+        """
         if not query or not query.strip():
             return False
 
-        query = query.strip()
-        sentence_count = len(re.findall(r'[.!?]+', query))
+        p = self._text_profile(query)
 
-        if sentence_count > 1:
-            return (len(query) >= Config.QUERY_ENHANCEMENT_MIN_LENGTH or
-                    sentence_count > 3)
+        if p['looks_logs'] or p['looks_trace']:
+            return False
+        if p['url_hits'] >= 5 or (p['lines'] >= 5 and p['url_hits'] >= p['lines'] * 0.3):
+            return False
+        if p['lines'] == 1 and re.search(r'\b[A-Za-z_]\w*\s*=\s*[A-Za-z_]\w*\s*\([^)]*\)', query):
+            return False
+        if p['length'] > 200 and p['letter_ratio'] < 0.35:
+            return False
 
-        return len(query) > Config.QUERY_ENHANCEMENT_MAX_SIMPLE_LENGTH
+        if p['length'] <= Config.MIN_QUERY_LENGTH:
+            return False
+        if p['code_density'] >= 0.45:
+            return False
+
+        score = 0
+        if p['length'] >= Config.QUERY_ENHANCEMENT_MIN_LENGTH: score += 1
+        if p['length'] >= Config.QUERY_ENHANCEMENT_MAX_SIMPLE_LENGTH: score += 1
+        if p['sentences'] >= 2: score += 1
+        if p['clauses']   >= 2: score += 1      # commas/colons/semicolons/dashes
+        if p['questions'] >= 2: score += 1
+        if p['caps']      >= 2: score += 1      # multiple capitalized tokens (entities)
+        if p['lines'] >= 2 and p['avg_line_len'] >= 20: score += 1
+        if p['uniq_ratio'] >= 0.6 and p['length'] >= 60: score += 1
+        if p['date_hits'] >= 1: score += 1      # numeric/ordinal dates only
+
+        return score >= 3
 
     async def _enhance_query(self, query: str) -> List[str]:
         """Enhanced query enhancement using LLM for better semantic retrieval."""
@@ -1500,41 +1528,46 @@ class Filter:
 
     def _should_skip_memory_operations(self, message: str) -> Tuple[bool, str]:
         """
-        Enhanced determination of whether memory operations should be skipped.
-        Returns (should_skip, reason).
-
-        Skips memory operations for:
-        1. Very long messages (>5000 chars) that could overwhelm the LLM
-        2. Non-textual content like code, structured data, or lists
+        Structure-only gating for memory ops.
+        Skips: too long, fenced code/structured blocks, logs, stack traces, URL dumps,
+            high code-line density, or long symbol/digit spam.
         """
         if not message or not message.strip():
             return True, Config.STATUS_MESSAGES['SKIP_EMPTY']
 
-        message = message.strip()
+        msg = message.strip()
 
-        
-        if len(message) > Config.MAX_MESSAGE_LENGTH:
-            return True, f"{Config.STATUS_MESSAGES['SKIP_TOO_LONG']} ({len(message)} chars > {Config.MAX_MESSAGE_LENGTH})"
+        if len(msg) > Config.MAX_MESSAGE_LENGTH:
+            return True, f"{Config.STATUS_MESSAGES['SKIP_TOO_LONG']} ({len(msg)} chars > {Config.MAX_MESSAGE_LENGTH})"
 
-        
+        # Early: single-line "x = func(...)" looks like code
+        if re.search(r'\b[A-Za-z_]\w*\s*=\s*[A-Za-z_]\w*\s*\([^)]*\)', msg):
+            return True, Config.STATUS_MESSAGES['SKIP_CODE']
+
+        # Quick fences
         for pattern in Config.CODE_PATTERNS:
-            if re.search(pattern, message, re.IGNORECASE | re.MULTILINE):
+            if re.search(pattern, msg, re.IGNORECASE | re.MULTILINE):
                 return True, Config.STATUS_MESSAGES['SKIP_CODE']
 
-        
         for pattern in Config.STRUCTURED_DATA_PATTERNS:
-            if re.search(pattern, message, re.MULTILINE):
+            if re.search(pattern, msg, re.MULTILINE):
                 return True, Config.STATUS_MESSAGES['SKIP_STRUCTURED']
 
-        
-        words = re.findall(r'\b[a-zA-Z]{2,}\b', message)
-        total_chars = len(message)
-        word_chars = sum(len(word) for word in words)
+        p = self._text_profile(msg)
 
-        if total_chars > 200 and (word_chars / total_chars) < 0.3:
+        if p['looks_logs']:
+            return True, Config.STATUS_MESSAGES['SKIP_LOGS']
+        if p['looks_trace']:
+            return True, Config.STATUS_MESSAGES['SKIP_STACKTRACE']
+        if p['url_hits'] >= 5 or (p['lines'] >= 5 and p['url_hits'] >= p['lines'] * 0.3):
+            return True, Config.STATUS_MESSAGES['SKIP_URL_DUMP']
+        if p['code_density'] >= 0.45:
+            return True, Config.STATUS_MESSAGES['SKIP_CODE']
+        if p['length'] > 200 and p['letter_ratio'] < 0.35:
             return True, Config.STATUS_MESSAGES['SKIP_SYMBOLS']
 
         return False, ""
+
 
     async def get_relevant_memories(
         self, current_message: str, user_id: str, threshold: Optional[float] = None, max_memories: Optional[int] = None, verbose_logging: bool = True
@@ -1935,3 +1968,65 @@ class Filter:
             error_msg = f"Unexpected error during LLM query: {e}"
             logger.error(error_msg)
             raise NeuralRecallError(error_msg) from e
+
+    def _is_codey_line(self, ln: str) -> bool:
+        """Structure-only code line detection; low false positives."""
+        kw = bool(re.search(r'\b(return|class|def|func|var|let|const|import|from|public|private|protected|interface|enum)\b', ln))
+        assign = bool(re.search(r'\b[A-Za-z_]\w*\s*=\s*[^=]', ln))
+        braces = bool(re.search(r'[{}]', ln))
+        end_sc = bool(re.search(r';\s*$', ln))
+        paren_block = bool(re.search(r'\)\s*(\{|;)', ln)) or bool(re.search(r'\(.*\)\s*\{', ln))
+        angle_inc = bool(re.search(r'#include\s*<', ln))
+        score = kw + assign + braces + end_sc + paren_block + angle_inc
+        return score >= 2
+
+    def _text_profile(self, s: str) -> Dict[str, float]:
+        """Language-agnostic structure profile used by gating & enhancement."""
+        s = s.strip()
+        lines = s.splitlines() or [s]
+        nonspace = sum(1 for c in s if not c.isspace()) or 1
+
+        letters = sum(1 for c in s if c.isalpha())
+        digits  = sum(1 for c in s if c.isdigit())
+        punct   = sum(1 for c in s if c in string.punctuation)
+
+        sentences = max(1, len(re.findall(r'[.!?]+(?=\s|$)', s)))
+        clauses   = len(re.findall(r'[,:;–—-]', s))
+        questions = s.count('?')
+        caps      = len(re.findall(r'\b[A-Z][A-Za-z]{2,}\b', s))
+
+        url_hits  = len(re.findall(r'https?://|www\.', s, re.I))
+        date_hits = len(re.findall(
+            r'\b\d{4}-\d{2}-\d{2}\b|'               
+            r'\b\d{1,2}[/-]\d{1,2}([/-]\d{2,4})?\b|'  
+            r'\b\d{1,2}(st|nd|rd|th)\b',              
+            s, re.I))
+
+        code_lines = sum(1 for ln in lines[:300] if self._is_codey_line(ln))
+        code_density = code_lines / max(1, min(len(lines), 300))
+
+        ts_pat     = re.compile(r'^\s*\d{2,4}[-/]\d{1,2}[-/]\d{1,2}[ T]\d{1,2}:\d{2}:\d{2}')
+        br_lvl_pat = re.compile(r'\[[A-Z]{3,10}\]')
+        frame_java = re.compile(r'^\s*at\s+\S+\(.*\)$')
+        frame_path = re.compile(r'[/\\].+\.(py|java|js|ts|go|rb|cs|cpp|c)\b', re.I)
+
+        ts_hits     = sum(1 for ln in lines[:200] if ts_pat.search(ln))
+        br_lvl_hits = sum(1 for ln in lines[:200] if br_lvl_pat.search(ln))
+        java_hits   = sum(1 for ln in lines[:200] if frame_java.search(ln))
+        path_hits   = sum(1 for ln in lines[:200] if frame_path.search(ln))
+        looks_logs  = (ts_hits >= 3) or (br_lvl_hits >= 3)
+        looks_trace = (java_hits >= 3) or (path_hits >= 2 and 'traceback' in s.lower())
+
+        avg_line_len = (sum(len(ln) for ln in lines) / len(lines)) if lines else len(s)
+        tokens       = re.findall(r"[^\W\d_]+", s, re.UNICODE)
+        uniq_tokens  = set(t.lower() for t in tokens)
+        total_tokens = max(1, len(tokens))
+        uniq_ratio   = len(uniq_tokens) / total_tokens
+
+        return dict(
+            length=len(s), lines=len(lines), avg_line_len=avg_line_len,
+            sentences=sentences, clauses=clauses, questions=questions, caps=caps,
+            letter_ratio=letters/nonspace, digit_ratio=digits/nonspace, punct_ratio=punct/nonspace,
+            code_density=code_density, url_hits=url_hits, date_hits=date_hits,
+            looks_logs=looks_logs, looks_trace=looks_trace, uniq_ratio=uniq_ratio
+        )
