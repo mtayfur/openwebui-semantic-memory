@@ -121,12 +121,12 @@ class Config:
     ]
 
     STRUCTURED_DATA_PATTERNS = [
-        r'^\s*[\{\[]...[\}\]]\s*$',                                  # literal "..."
-        r'^\s*<[^>]+>[\s\S]*</[^>]+>\s*$',                            # xml/html-ish
-        r'^\s*\|[^|]+\|[^|]+\|',                                      # markdown tables
-        r'^\s*[-\*\+]\s+.+(\n\s*[-\*\+]\s+.+){3,}',                   # long bullet lists
-        r'^\s*\d+\.\s+.+(\n\s*\d+\.\s+.+){3,}',                       # long ordered lists
-        r'^\s*[A-Za-z0-9_]+:\s+\S+(\n\s*[A-Za-z0-9_]+:\s+\S+){3,}',   # yaml-ish (space after colon)
+        r'^\s*[\{\[]...[\}\]]\s*$',                            
+        r'^\s*<[^>]+>[\s\S]*</[^>]+>\s*$',                        
+        r'^\s*\|[^|]+\|[^|]+\|',                               
+        r'^\s*[-\*\+]\s+.+(\n\s*[-\*\+]\s+.+){3,}',                 
+        r'^\s*\d+\.\s+.+(\n\s*\d+\.\s+.+){3,}',                       
+        r'^\s*[A-Za-z0-9_]+:\s+\S+(\n\s*[A-Za-z0-9_]+:\s+\S+){3,}', 
     ]
 
     STATUS_MESSAGES = {
@@ -722,28 +722,23 @@ class Filter:
             
         query = query.strip()
         
-        # Skip if too short
         if len(query) <= Config.MIN_QUERY_LENGTH:
             return False
             
-        # Skip obvious code patterns
-        if self._is_codey_line(query) or re.search(r'\b[A-Za-z_]\w*\s*=\s*[A-Za-z_]\w*\s*\([^)]*\)', query):
+        if re.search(r'^\s*```|^\s*(def|class|function|var|let|const|import)\s+\w+', query):
             return False
             
-        p = self._text_profile(query)
+        text_chars = sum(1 for c in query if c.isalpha() or c.isspace())
+        if text_chars / len(query) < 0.5:
+            return False
         
-        # Skip logs, stack traces, URL dumps, or high code density
-        if (p['looks_logs'] or p['looks_trace'] or 
-            p['url_hits'] >= 5 or 
-            p['code_density'] >= 0.45 or
-            (p['lines'] >= 5 and p['url_hits'] >= p['lines'] * 0.3) or
-            (p['length'] > 200 and p['letter_ratio'] < 0.35)):
-            return False
-            
-        # Enhance if it looks like a natural language query with substance
-        return (p['sentences'] >= 2 or 
-                p['questions'] >= 1 or 
-                (p['length'] >= Config.QUERY_ENHANCEMENT_MIN_LENGTH and p['uniq_ratio'] >= 0.4))
+        words = query.split()
+        has_question = '?' in query
+        has_multiple_words = len(words) >= 3
+        is_long_enough = len(query) >= Config.QUERY_ENHANCEMENT_MIN_LENGTH
+        has_substantial_content = len(words) >= 5
+        
+        return has_question or (has_multiple_words and (is_long_enough or has_substantial_content))
 
     async def _enhance_query(self, query: str) -> List[str]:
         """Enhanced query enhancement using LLM for better semantic retrieval."""
@@ -1531,37 +1526,35 @@ class Filter:
 
         msg = message.strip()
 
-        # Skip if too long
         if len(msg) > Config.MAX_MESSAGE_LENGTH:
             return True, f"{Config.STATUS_MESSAGES['SKIP_TOO_LONG']} ({len(msg)} chars > {Config.MAX_MESSAGE_LENGTH})"
 
-        # Skip obvious code patterns
-        if re.search(r'\b[A-Za-z_]\w*\s*=\s*[A-Za-z_]\w*\s*\([^)]*\)', msg):
-            return True, Config.STATUS_MESSAGES['SKIP_CODE']
-
-        # Check for code or structured data patterns
-        for pattern in Config.CODE_PATTERNS:
-            if re.search(pattern, msg, re.IGNORECASE | re.MULTILINE):
-                return True, Config.STATUS_MESSAGES['SKIP_CODE']
-
-        for pattern in Config.STRUCTURED_DATA_PATTERNS:
+        code_indicators = [
+            r'^\s*```',  
+            r'^\s*(def|class|function|var|let|const|import|from)\s+\w+',
+            r'^\s*[A-Za-z_]\w*\s*[=:]\s*[A-Za-z_]\w*\s*\(', 
+            r'^\s*\{\s*\}\s*$', 
+            r'<[^>]+>[\s\S]*</[^>]+>',  
+        ]
+        
+        for pattern in code_indicators:
             if re.search(pattern, msg, re.MULTILINE):
-                return True, Config.STATUS_MESSAGES['SKIP_STRUCTURED']
-
-        # Use text profile for more detailed analysis
-        p = self._text_profile(msg)
-
-        # Skip based on content characteristics
-        if p['looks_logs']:
-            return True, Config.STATUS_MESSAGES['SKIP_LOGS']
-        if p['looks_trace']:
-            return True, Config.STATUS_MESSAGES['SKIP_STACKTRACE']
-        if p['url_hits'] >= 5 or (p['lines'] >= 5 and p['url_hits'] >= p['lines'] * 0.3):
-            return True, Config.STATUS_MESSAGES['SKIP_URL_DUMP']
-        if p['code_density'] >= 0.45:
-            return True, Config.STATUS_MESSAGES['SKIP_CODE']
-        if p['length'] > 200 and p['letter_ratio'] < 0.35:
+                return True, Config.STATUS_MESSAGES['SKIP_CODE']
+        
+        text_chars = sum(1 for c in msg if c.isalpha() or c.isspace())
+        if len(msg) > 20 and text_chars / len(msg) < 0.5:
             return True, Config.STATUS_MESSAGES['SKIP_SYMBOLS']
+        
+        lines = msg.split('\n')
+        if len(lines) > 3:
+            pipe_lines = sum(1 for line in lines if '|' in line and line.count('|') >= 2)
+            if pipe_lines >= len(lines) * 0.6:
+                return True, Config.STATUS_MESSAGES['SKIP_STRUCTURED']
+        
+        if len(lines) > 5:
+            timestamp_lines = sum(1 for line in lines if re.search(r'\d{2,4}[-/]\d{1,2}[-/]\d{1,2}', line))
+            if timestamp_lines >= len(lines) * 0.3:
+                return True, Config.STATUS_MESSAGES['SKIP_LOGS']
 
         return False, ""
 
