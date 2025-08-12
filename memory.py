@@ -714,41 +714,36 @@ class Filter:
 
     def _should_enhance_query(self, query: str) -> bool:
         """
-        Decide if LLM enhancement is worthwhile (structure-only).
-        Enhance for multi-part, time-rich, or entity-rich natural inputs.
-        Avoid dumps, code, very short, or symbol-noise.
+        Simplified decision logic for query enhancement.
+        Enhance natural language queries with substance, avoid code/logs/short queries.
         """
         if not query or not query.strip():
             return False
-
+            
+        query = query.strip()
+        
+        # Skip if too short
+        if len(query) <= Config.MIN_QUERY_LENGTH:
+            return False
+            
+        # Skip obvious code patterns
+        if self._is_codey_line(query) or re.search(r'\b[A-Za-z_]\w*\s*=\s*[A-Za-z_]\w*\s*\([^)]*\)', query):
+            return False
+            
         p = self._text_profile(query)
-
-        if p['looks_logs'] or p['looks_trace']:
+        
+        # Skip logs, stack traces, URL dumps, or high code density
+        if (p['looks_logs'] or p['looks_trace'] or 
+            p['url_hits'] >= 5 or 
+            p['code_density'] >= 0.45 or
+            (p['lines'] >= 5 and p['url_hits'] >= p['lines'] * 0.3) or
+            (p['length'] > 200 and p['letter_ratio'] < 0.35)):
             return False
-        if p['url_hits'] >= 5 or (p['lines'] >= 5 and p['url_hits'] >= p['lines'] * 0.3):
-            return False
-        if p['lines'] == 1 and re.search(r'\b[A-Za-z_]\w*\s*=\s*[A-Za-z_]\w*\s*\([^)]*\)', query):
-            return False
-        if p['length'] > 200 and p['letter_ratio'] < 0.35:
-            return False
-
-        if p['length'] <= Config.MIN_QUERY_LENGTH:
-            return False
-        if p['code_density'] >= 0.45:
-            return False
-
-        score = 0
-        if p['length'] >= Config.QUERY_ENHANCEMENT_MIN_LENGTH: score += 1
-        if p['length'] >= Config.QUERY_ENHANCEMENT_MAX_SIMPLE_LENGTH: score += 1
-        if p['sentences'] >= 2: score += 1
-        if p['clauses']   >= 2: score += 1      # commas/colons/semicolons/dashes
-        if p['questions'] >= 2: score += 1
-        if p['caps']      >= 2: score += 1      # multiple capitalized tokens (entities)
-        if p['lines'] >= 2 and p['avg_line_len'] >= 20: score += 1
-        if p['uniq_ratio'] >= 0.6 and p['length'] >= 60: score += 1
-        if p['date_hits'] >= 1: score += 1      # numeric/ordinal dates only
-
-        return score >= 3
+            
+        # Enhance if it looks like a natural language query with substance
+        return (p['sentences'] >= 2 or 
+                p['questions'] >= 1 or 
+                (p['length'] >= Config.QUERY_ENHANCEMENT_MIN_LENGTH and p['uniq_ratio'] >= 0.4))
 
     async def _enhance_query(self, query: str) -> List[str]:
         """Enhanced query enhancement using LLM for better semantic retrieval."""
@@ -1528,23 +1523,23 @@ class Filter:
 
     def _should_skip_memory_operations(self, message: str) -> Tuple[bool, str]:
         """
-        Structure-only gating for memory ops.
-        Skips: too long, fenced code/structured blocks, logs, stack traces, URL dumps,
-            high code-line density, or long symbol/digit spam.
+        Simplified gating for memory operations.
+        Skips: empty, too long, code, logs, structured data, URL dumps, or symbol spam.
         """
         if not message or not message.strip():
             return True, Config.STATUS_MESSAGES['SKIP_EMPTY']
 
         msg = message.strip()
 
+        # Skip if too long
         if len(msg) > Config.MAX_MESSAGE_LENGTH:
             return True, f"{Config.STATUS_MESSAGES['SKIP_TOO_LONG']} ({len(msg)} chars > {Config.MAX_MESSAGE_LENGTH})"
 
-        # Early: single-line "x = func(...)" looks like code
+        # Skip obvious code patterns
         if re.search(r'\b[A-Za-z_]\w*\s*=\s*[A-Za-z_]\w*\s*\([^)]*\)', msg):
             return True, Config.STATUS_MESSAGES['SKIP_CODE']
 
-        # Quick fences
+        # Check for code or structured data patterns
         for pattern in Config.CODE_PATTERNS:
             if re.search(pattern, msg, re.IGNORECASE | re.MULTILINE):
                 return True, Config.STATUS_MESSAGES['SKIP_CODE']
@@ -1553,8 +1548,10 @@ class Filter:
             if re.search(pattern, msg, re.MULTILINE):
                 return True, Config.STATUS_MESSAGES['SKIP_STRUCTURED']
 
+        # Use text profile for more detailed analysis
         p = self._text_profile(msg)
 
+        # Skip based on content characteristics
         if p['looks_logs']:
             return True, Config.STATUS_MESSAGES['SKIP_LOGS']
         if p['looks_trace']:
