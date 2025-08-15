@@ -1,13 +1,93 @@
 #!/usr/bin/env python3
 """
 Test script for the updated Neural Recall v3 prompts and skip logic.
+
+Includes comprehensive tests for:
+- Enhanced skip logic and edge cases
+- Memory injection tracking functionality
+- LLM prompt validation
+- JSON detection and parsing
+- Configuration validation
+- Cache operations and user isolation
+- Database operation wrappers
+- Status emission and error handling
+- Memory operation validation
+- Context injection (datetime and memories)
+- Custom exception handling
 """
 
 import asyncio
 import json
 import re
 from typing import Tuple, List, Dict, Any
-from neural_recall_v3 import Filter, Config, MemoryOperation
+from neural_recall_v3 import Filter, Config, SkipThresholds, MemoryOperation
+
+
+async def test_llm_prompt():
+    """Verify consolidation system prompt contains only the user message (no full conversation)."""
+    f = Filter()
+
+    captured = {}
+
+    async def fake_query(system_prompt, user_prompt, json_response=True):
+        captured["system"] = system_prompt
+        captured["user"] = user_prompt
+        return "[]"
+
+    # patch the network call
+    f._query_llm = fake_query
+
+    user_message = "I started yoga twice a week and enjoy the meditation"
+    candidates = [
+        {"id": "mem-1", "content": "User enjoys physical exercise", "created_at": None, "updated_at": None, "relevance": 0.9}
+    ]
+
+    await f._llm_consolidate_memories(user_message, candidates, emitter=None)
+
+    assert "system" in captured, "LLM was not called or system prompt not captured"
+    system_prompt = captured["system"]
+
+    assert "## USER MESSAGE" in system_prompt, "Expected USER MESSAGE section in system prompt"
+    assert "Full Context" not in system_prompt and "CONVERSATION CONTEXT" not in system_prompt, (
+        "System prompt should not contain full conversation context"
+    )
+
+    return True
+
+
+async def test_outlet_no_conversation_context():
+    """Verify outlet schedules consolidation with only (user_message, user_id)."""
+    f = Filter()
+    recorder = []
+
+    async def fake_consolidation(user_message, user_id, emitter=None):
+        recorder.append((user_message, user_id))
+        return None
+
+    # patch the background task
+    f._consolidation_pipeline_task = fake_consolidation
+
+    body = {
+        "messages": [
+            {"role": "assistant", "content": "Okay"},
+            {"role": "user", "content": "I like pizza"},
+        ]
+    }
+    user = {"id": "user-123"}
+
+    await f.outlet(body, __event_emitter__=None, __user__=user)
+
+    # allow scheduled task to run
+    await asyncio.sleep(0.05)
+
+    assert len(recorder) == 1, "Consolidation task was not invoked exactly once"
+    called_user_message, called_user_id = recorder[0]
+
+    assert called_user_message == "I like pizza", "User message passed to consolidation should be the user's last message"
+    assert called_user_id == "user-123", "User id passed to consolidation task was incorrect"
+
+    return True
+
 
 def test_skip_logic():
     """Test the enhanced skip logic with various message types."""
@@ -78,6 +158,7 @@ def test_skip_logic():
         ("Name | Age | Department\nJohn | 30 | Engineering\nJane | 28 | Marketing", "SKIP_STRUCTURED", True),
         ("{\"key\": \"value\", \"array\": [1, 2, 3]}", "SKIP_STRUCTURED", True),
         ("[{\"id\": 1}, {\"id\": 2}, {\"id\": 3}]", "SKIP_STRUCTURED", True),
+        ('{\n"video_prompt": {\n"duration": "8s",\n"style": "ultra-realistic cinematic fashion film",\n"location": "empty Parisian cobblestone streets at golden hour",\n"lighting": "soft warm sunlight, natural lens flare, golden reflections on buildings",\n"camera_movements": "smooth cinematic transitions between shots, gentle tracking and panning",\n"scenes": [\n{\n"timeframe": "0-2s",\n"description": "Wide shot — A beautiful, elegant woman with long dark hair walks gracefully down an empty Paris street, wearing a flowing black satin evening dress, subtle breeze moving the fabric. Soft sunlight hits her from the side, creating a warm glow."\n},\n{\n"timeframe": "2-4s",\n"description": "Medium tracking shot from the side — Camera glides smoothly as she walks past ornate Parisian architecture, shadows dancing on the cobblestones, dress catching the light with silky reflections."\n},\n{\n"timeframe": "4-6s",\n"description": "Slow dolly-in — The woman pauses, turns her head slightly towards the camera with a confident and serene expression, earrings subtly sparkling, background softly blurred."\n},\n{\n"timeframe": "6-8s",\n"description": "Over-the-shoulder shot — She continues walking away, the golden sun casting a long, elegant silhouette ahead of her on the cobblestones, with a gentle fade-out to black."\n}\n],\n"restrictions": {\n"text": "none",\n"signs": "none",\n"billboards": "none",\n"logos": "none"\n},\n"mood": "sophisticated, timeless, romantic"\n}\n}\n\nupdate above prompt use black luxury night dress', "SKIP_STRUCTURED", True),
         
         # URL dumps
         ("Check out https://example.com and https://test.com and https://demo.com", "SKIP_URL_DUMP", True),
@@ -85,7 +166,7 @@ def test_skip_logic():
         ("Links: http://a.com http://b.com http://c.com", "SKIP_URL_DUMP", True),
         
         # Too long messages
-        ("x" * (Config.MAX_MESSAGE_LENGTH + 1), "SKIP_TOO_LONG", True),
+        ("x" * (SkipThresholds.MAX_MESSAGE_LENGTH + 1), "SKIP_TOO_LONG", True),
         ("This is a very long message. " * 150, "SKIP_TOO_LONG", True),
         
         # Should NOT skip - Valid memory-worthy content
@@ -160,17 +241,25 @@ def test_prompt_content():
     
     # Test consolidation prompt
     consolidation_checks = [
-        "Verifiable Factuality",
-        "Informational Density", 
-        "Temporal Precedence",
-        "Contextual Grounding",
-        "Rich Context Preservation",
-        "What constitutes valuable memory information",
-        "Personal preferences and constraints",
-        "Ongoing projects with names",
-        "Skills, expertise levels",
-        "August 14 2025",
-        "August 22 2025"
+        "PRESERVATION IS THE PRIMARY GOAL",
+        "DELETE SPARINGLY",
+        "PRESERVE INFORMATION",
+        "MINIMAL OPERATIONS", 
+        "ATOMICITY PREFERENCE",
+        "ENRICHMENT FOCUS",
+        "Memory Enrichment",
+        "atomic, valuable facts",
+        "preferences, skills, context, goals",
+        "CREATE ONLY WHEN",
+        "MERGE ONLY WHEN",
+        "SPLIT ONLY WHEN", 
+        "UPDATE ONLY WHEN",
+        "DELETE ONLY WHEN",
+        "PREFER NO-OP",
+        "PRESERVATION PRINCIPLES",
+        "When uncertain between merge vs. separate, choose separate",
+        "When uncertain, choose preservation over consolidation",
+        "User context richness is more valuable than database tidiness"
     ]
     
     print("📝 Checking consolidation prompt:")
@@ -246,6 +335,62 @@ def test_memory_operation_validation():
             else:
                 print(f"❌ FAIL: {description} -> Unexpected exception: {e}")
                 failed += 1
+    
+    print(f"\n📊 Results: {passed} passed, {failed} failed")
+    return failed == 0
+
+def test_json_detection_accuracy():
+    """Test JSON detection accuracy and edge cases."""
+    print("\n🧪 Testing JSON detection accuracy")
+    print("=" * 50)
+    
+    filter_instance = Filter()
+    
+    # JSON patterns that SHOULD be skipped
+    json_should_skip = [
+        ('{"simple": "object"}', "Simple JSON object"),
+        ('[1, 2, 3, 4, 5]', "Simple JSON array"),
+        ('{"nested": {"deep": {"value": 123}}}', "Deeply nested JSON"),
+        ('{"array": [{"id": 1}, {"id": 2}]}', "JSON with nested array"),
+        ('[\n  {\n    "name": "John",\n    "age": 30\n  }\n]', "Pretty-printed JSON"),
+        ('{"a":1,"b":2,"c":3,"d":4,"e":5}', "Compact JSON with 5+ keys"),
+        ('name: "test", age: 25, city: "NYC", country: "USA", active: true', "Unquoted JSON-style (5 keys)"),
+        ('api_key: abc123, timeout: 5000, retries: 3, debug: true, verbose: false', "Config-style JSON (5 keys)"),
+    ]
+    
+    # JSON-like patterns that should NOT be skipped
+    json_should_not_skip = [
+        ('My name is John and I am 30 years old', "Natural language with JSON-like structure"),
+        ('The key to success is hard work', "Contains 'key' but not JSON"),
+        ('I have 3 items: apple, banana, orange', "Colon in natural context"),
+        ('Setting: bright, Mood: happy', "Simple attributes (under threshold)"),
+        ('Question: What is AI? Answer: Artificial Intelligence', "Q&A format"),
+        ('{incomplete json object', "Malformed JSON"),
+        ('not_json: but_looks_like: it: maybe', "Invalid JSON syntax"),
+    ]
+    
+    passed = 0
+    failed = 0
+    
+    # Test patterns that should skip
+    for json_text, description in json_should_skip:
+        should_skip, reason = filter_instance._should_skip_memory_operations(json_text)
+        if should_skip and "structured" in reason:
+            print(f"✅ PASS: {description} -> SKIPPED (JSON detected)")
+            passed += 1
+        else:
+            print(f"❌ FAIL: {description} -> Expected skip but got: {should_skip} ({reason})")
+            failed += 1
+    
+    # Test patterns that should NOT skip
+    for text, description in json_should_not_skip:
+        should_skip, reason = filter_instance._should_skip_memory_operations(text)
+        if not should_skip:
+            print(f"✅ PASS: {description} -> NOT SKIPPED (correctly)")
+            passed += 1
+        else:
+            print(f"❌ FAIL: {description} -> Unexpected skip: {reason}")
+            failed += 1
     
     print(f"\n📊 Results: {passed} passed, {failed} failed")
     return failed == 0
@@ -431,8 +576,8 @@ def test_config_constants():
     
     constants_checks = [
         ("CACHE_MAX_SIZE", hasattr(Config, 'CACHE_MAX_SIZE') and Config.CACHE_MAX_SIZE > 0),
-        ("MAX_MESSAGE_LENGTH", hasattr(Config, 'MAX_MESSAGE_LENGTH') and Config.MAX_MESSAGE_LENGTH > 0),
-        ("MIN_QUERY_LENGTH", hasattr(Config, 'MIN_QUERY_LENGTH') and Config.MIN_QUERY_LENGTH > 0),
+        ("MAX_MESSAGE_LENGTH", hasattr(SkipThresholds, 'MAX_MESSAGE_LENGTH') and SkipThresholds.MAX_MESSAGE_LENGTH > 0),
+        ("MIN_QUERY_LENGTH", hasattr(SkipThresholds, 'MIN_QUERY_LENGTH') and SkipThresholds.MIN_QUERY_LENGTH > 0),
         ("DEFAULT_SEMANTIC_THRESHOLD", hasattr(Config, 'DEFAULT_SEMANTIC_THRESHOLD') and 0.0 <= Config.DEFAULT_SEMANTIC_THRESHOLD <= 1.0),
         ("STATUS_MESSAGES dict", hasattr(Config, 'STATUS_MESSAGES') and isinstance(Config.STATUS_MESSAGES, dict)),
         ("STATUS_MESSAGES not empty", len(Config.STATUS_MESSAGES) > 0),
@@ -460,29 +605,44 @@ def test_skip_logic_edge_cases():
     
     filter_instance = Filter()
     
-    # Test boundary conditions
+    # Generate dynamic test cases based on Config constants
     edge_cases = [
-        # Length boundaries
-        ("a" * (Config.MIN_QUERY_LENGTH - 1), True, "Below minimum query length"),
-        ("a" * Config.MIN_QUERY_LENGTH, False, "Exactly minimum query length"),
-        ("a" * (Config.MAX_MESSAGE_LENGTH - 1), False, "Just under max length"),
-        ("a" * Config.MAX_MESSAGE_LENGTH, False, "Exactly max length"),
+        # Length boundaries (dynamic from Config)
+        ("a" * (SkipThresholds.MIN_QUERY_LENGTH - 1), True, f"Below minimum query length ({SkipThresholds.MIN_QUERY_LENGTH - 1} chars)"),
+        ("a" * SkipThresholds.MIN_QUERY_LENGTH, False, f"Exactly minimum query length ({SkipThresholds.MIN_QUERY_LENGTH} chars)"),
+        ("a" * (SkipThresholds.MAX_MESSAGE_LENGTH - 1), False, f"Just under max length ({SkipThresholds.MAX_MESSAGE_LENGTH - 1} chars)"),
+        ("a" * SkipThresholds.MAX_MESSAGE_LENGTH, False, f"Exactly max length ({SkipThresholds.MAX_MESSAGE_LENGTH} chars)"),
         
-        # Symbol ratio boundaries
+        # Symbol ratio boundaries (dynamic from SkipThresholds.SYMBOL_RATIO_THRESHOLD = 0.5)
         ("hello world!!!", False, "Normal text with few symbols"),
         ("hello!!!!!!!!!", True, "Text with many symbols"),
-        ("a" * 5 + "#" * 6, True, "Just over 50% symbols"),
-        ("a" * 6 + "#" * 5, False, "Just under 50% symbols"),
+        # Generate strings that are just over and under the symbol threshold
+        ("a" * int(SkipThresholds.SYMBOL_CHECK_MIN_LENGTH * SkipThresholds.SYMBOL_RATIO_THRESHOLD) + "#" * int(SkipThresholds.SYMBOL_CHECK_MIN_LENGTH * (1 - SkipThresholds.SYMBOL_RATIO_THRESHOLD) + 1), True, f"Just over {SkipThresholds.SYMBOL_RATIO_THRESHOLD*100}% symbols"),
+        ("a" * int(SkipThresholds.SYMBOL_CHECK_MIN_LENGTH * SkipThresholds.SYMBOL_RATIO_THRESHOLD + 1) + "#" * int(SkipThresholds.SYMBOL_CHECK_MIN_LENGTH * (1 - SkipThresholds.SYMBOL_RATIO_THRESHOLD)), False, f"Just under {SkipThresholds.SYMBOL_RATIO_THRESHOLD*100}% symbols"),
         
-        # Multiline edge cases
+        # Multiline edge cases (dynamic from SkipThresholds.STRUCTURED_LINE_COUNT_MIN)
         ("line1\nline2", False, "Simple two lines"),
         ("key1: val1\nkey2: val2", False, "Two key-value pairs"),
-        ("key1: val1\nkey2: val2\nkey3: val3", True, "Three key-value pairs (triggers structured)"),
+        ("\n".join([f"key{i}: val{i}" for i in range(1, SkipThresholds.STRUCTURED_LINE_COUNT_MIN + 1)]), True, f"{SkipThresholds.STRUCTURED_LINE_COUNT_MIN} key-value pairs (triggers structured)"),
         
-        # URL edge cases
+        # URL edge cases (dynamic from SkipThresholds.URL_COUNT_THRESHOLD)
         ("Visit https://example.com", False, "Single URL"),
-        ("Links: https://a.com https://b.com", False, "Two URLs"),
-        ("See: https://a.com https://b.com https://c.com", True, "Three URLs (triggers dump)"),
+        ("Links: " + " ".join([f"https://site{i}.com" for i in range(1, SkipThresholds.URL_COUNT_THRESHOLD)]), False, f"{SkipThresholds.URL_COUNT_THRESHOLD - 1} URLs"),
+        ("See: " + " ".join([f"https://site{i}.com" for i in range(1, SkipThresholds.URL_COUNT_THRESHOLD + 1)]), True, f"{SkipThresholds.URL_COUNT_THRESHOLD} URLs (triggers dump)"),
+        
+        # JSON key-value threshold (dynamic from SkipThresholds.JSON_KEY_VALUE_THRESHOLD)  
+        # Use unquoted format to test the key-value count specifically without triggering other JSON patterns
+        (", ".join([f"key{i}: val{i}" for i in range(1, SkipThresholds.JSON_KEY_VALUE_THRESHOLD)]), False, f"Key-value pairs with {SkipThresholds.JSON_KEY_VALUE_THRESHOLD - 1} pairs (under threshold)"),
+        (", ".join([f"key{i}: val{i}" for i in range(1, SkipThresholds.JSON_KEY_VALUE_THRESHOLD + 1)]), True, f"Key-value pairs with {SkipThresholds.JSON_KEY_VALUE_THRESHOLD} pairs (triggers skip)"),
+        
+        # Structured data line count (dynamic from SkipThresholds.STRUCTURED_LINE_COUNT_MIN)
+        ("\n".join([f"- Item {i}" for i in range(1, SkipThresholds.STRUCTURED_LINE_COUNT_MIN)]), False, f"List with {SkipThresholds.STRUCTURED_LINE_COUNT_MIN - 1} items"),
+        ("\n".join([f"- Item {i}" for i in range(1, SkipThresholds.STRUCTURED_LINE_COUNT_MIN + 2)]), True, f"List with {SkipThresholds.STRUCTURED_LINE_COUNT_MIN + 1} items (triggers structured)"),
+        
+        # Symbol check minimum length boundary (dynamic from SkipThresholds.SYMBOL_CHECK_MIN_LENGTH) 
+        # Use a mix of symbols and letters to test the ratio boundary more precisely
+        ("a" * SkipThresholds.MIN_QUERY_LENGTH, False, f"Minimum query length, all letters"),
+        ("aa" + "#" * (SkipThresholds.SYMBOL_CHECK_MIN_LENGTH + 1), True, f"Above symbol check minimum with >{SkipThresholds.SYMBOL_RATIO_THRESHOLD*100}% symbols"),
         
         # Edge cases that should not skip (fixed expectations)
         ("I need to import my contacts", False, "Contains 'import' but not code"),
@@ -510,6 +670,63 @@ def test_skip_logic_edge_cases():
         ("The function isn't working as expected", False, "Function issue description"),
         ("I imported the CSV file successfully", False, "Past tense action"),
         ("My class schedule changed this semester", False, "Academic context"),
+        
+        # Additional boundary and edge case tests
+        # JSON variants and nested structures
+        ('{"name":"test","data":{"nested":true}}', True, "Nested JSON object"),
+        ('[{"a":1},{"b":2},{"c":3}]', True, "JSON array with multiple objects"),
+        ('name:"John",age:30,city:"NYC"', True, "JSON-like without quotes (5+ key-value pairs)"),
+        ('config: { api: "test", timeout: 5000 }', True, "Single key-value with object (contains JSON patterns)"),
+        
+        # Mixed content edge cases
+        ("Here's my config:\n{\n  \"api\": \"localhost\"\n}", True, "Text with embedded JSON"),
+        ("Error: Connection failed\nStack trace follows:", True, "Error pattern detected"),
+        ("Check logs at /var/log/app.log for details", False, "Log path mention without log dump"),
+        
+        # Code-like content that should NOT skip
+        ("I need to implement a function to calculate tax", False, "Natural language about implementing function"),
+        ("My SQL query returned unexpected results", False, "Mention of SQL without actual query"),
+        ("The import process took 2 hours", False, "Import as business process"),
+        ("I'm learning Python class inheritance", False, "Educational discussion about classes"),
+        
+        # Symbol boundary testing with context
+        ("Project #1: 50% done, #2: 25% done", True, "Numbers/symbols detected as structured"),
+        ("Error codes: E001, E002, E003, E004", True, "Multiple error codes pattern"),
+        ("!!!URGENT!!! Meeting moved to 3pm", False, "Exclamation emphasis in text"),
+        ("Password: ********", False, "Symbols but not majority"),
+        
+        # URL and link edge cases  
+        ("My blog is at https://myblog.com - check it out!", False, "Single URL in sentence"),
+        ("Compare https://site1.com vs https://site2.com", False, "Two URLs in comparison"),
+        ("Resources:\nhttps://a.com\nhttps://b.com\nhttps://c.com\nMore info", True, "URL list format"),
+        
+        # Structured data boundary conditions - dynamic from SkipThresholds
+        ("TODO:\n" + "\n".join([f"- Task {i}" for i in range(1, SkipThresholds.STRUCTURED_LINE_COUNT_MIN)]), False, f"Short list ({SkipThresholds.STRUCTURED_LINE_COUNT_MIN - 1} items, under threshold)"),
+        ("Shopping:\n" + "\n".join([f"- Item {i}" for i in range(1, max(4, int(SkipThresholds.STRUCTURED_LINE_COUNT_MIN / SkipThresholds.STRUCTURED_PERCENTAGE_THRESHOLD)) + 1)]), True, f"Longer list (triggers structured)"),
+        ("Question 1: What is AI?\nQuestion 2: How does ML work?", False, "Two numbered items"),
+        ("\n".join([f"{i}. Step {i}" for i in range(1, SkipThresholds.STRUCTURED_LINE_COUNT_MIN + 2)]), True, f"{SkipThresholds.STRUCTURED_LINE_COUNT_MIN + 1} numbered steps (triggers structured)"),
+        
+        # Multiline content with mixed patterns
+        ("Line 1\nsome: value\nLine 3", False, "Mixed content with single key-value"),
+        ("Header\n" + "\n".join([f"key{i}: val{i}" for i in range(1, SkipThresholds.STRUCTURED_LINE_COUNT_MIN + 1)]) + "\nFooter", True, f"Mixed content with {SkipThresholds.STRUCTURED_LINE_COUNT_MIN} key-values"),
+        
+        # Real-world edge cases
+        ("My GitHub repo: https://github.com/user/project", False, "Single repo link"),
+        ("Environment variables: API_KEY=secret, DEBUG=true", False, "Config mention without code block"),
+        ("Error 404: Page not found", True, "HTTP error message pattern"),
+        ("Version 3.2.1 released with bug fixes", False, "Version mention"),
+        
+        # Corner cases for code detection
+        ("My function as a manager is to oversee the team", False, "Function as role"),
+        ("I need to import new ideas into our process", False, "Import as business term"),
+        ("The class action lawsuit was filed yesterday", False, "Class as legal term"),
+        ("Please update me when you're available", False, "Update as communication"),
+        ("Let me select the best option for you", False, "Select as choice"),
+        
+        # Whitespace and formatting edge cases
+        ("   \t\n   ", True, "Only whitespace characters"),
+        ("Word\n\n\n\nWord", False, "Words separated by multiple newlines"),
+        ("Text    with    lots    of    spaces", False, "Text with excessive spacing"),
     ]
     
     passed = 0
@@ -1306,6 +1523,57 @@ async def test_memory_operation_execution():
     return failed == 0
 
 
+async def test_emit_status():
+    """Verify the Filter._emit_status fault tolerance with various emitters."""
+    f = Filter()
+
+    print("\n🧪 Testing Filter._emit_status fault tolerance")
+
+    # Test 1: None emitter (should return immediately)
+    await f._emit_status(None, "test message")
+    print("✅ None emitter handled correctly")
+
+    # Test 2: Sync emitter that works
+    def working_sync_emitter(payload):
+        print(f"Sync emitter received: {payload['data']['description']}")
+        return "success"
+
+    await f._emit_status(working_sync_emitter, "sync test message")
+    print("✅ Working sync emitter handled correctly")
+
+    # Test 3: Sync emitter that raises exception
+    def failing_sync_emitter(payload):
+        raise ValueError("Sync emitter failed!")
+
+    await f._emit_status(failing_sync_emitter, "failing sync test")
+    print("✅ Failing sync emitter handled correctly (did not crash)")
+
+    # Test 4: Async emitter that works
+    async def working_async_emitter(payload):
+        print(f"Async emitter received: {payload['data']['description']}")
+        await asyncio.sleep(0.05)
+        return "async success"
+
+    await f._emit_status(working_async_emitter, "async test message")
+    print("✅ Working async emitter handled correctly")
+
+    # Test 5: Async emitter that times out
+    async def slow_async_emitter(payload):
+        await asyncio.sleep(2.0)  # Will timeout after 1.0s in _emit_status
+        return "too slow"
+
+    await f._emit_status(slow_async_emitter, "timeout test")
+    print("✅ Slow async emitter handled correctly (timeout logged)")
+
+    # Test 6: Async emitter that raises exception
+    async def failing_async_emitter(payload):
+        raise RuntimeError("Async emitter crashed!")
+
+    await f._emit_status(failing_async_emitter, "failing async test")
+    print("✅ Failing async emitter handled correctly (did not crash)")
+
+    return True
+
 def main():
     """Run all tests."""
     print("�🚀 Testing Neural Recall v3 Updates - Comprehensive Test Suite")
@@ -1321,6 +1589,7 @@ def main():
     
     print("\nRunning advanced functionality tests...")
     test_results["Memory Operation Validation"] = test_memory_operation_validation()
+    test_results["JSON Detection Accuracy"] = test_json_detection_accuracy()
     test_results["DateTime Formatting"] = test_datetime_formatting()
     test_results["Text Extraction"] = test_text_extraction()
     test_results["JSON Extraction"] = test_json_extraction()
@@ -1337,6 +1606,7 @@ def main():
     test_results["User Cache Management"] = asyncio.run(test_user_cache_management())
     test_results["Status Emission"] = test_status_emission()
     test_results["Memory Operation Execution"] = asyncio.run(test_memory_operation_execution())
+    test_results["Emit Status"] = asyncio.run(test_emit_status())
     
     # Summary
     print(f"\n🎯 Overall Test Results:")

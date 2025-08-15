@@ -1,10 +1,6 @@
 """
-title: Neural Recall v3 - Dual Pipeline Architecture
+title: Neural Recall
 version: 3.0.0
-
-Complete architectural refactor implementing Retrieval Pipeline / Consolidation Pipeline model:
-- Retrieval Pipeline: Synchronous retrieval and re-ranking in inlet for context injection
-- Consolidation Pipeline: Asynchronous consolidation in outlet for memory management
 """
 
 import asyncio
@@ -17,6 +13,7 @@ from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable, Dict, List, Literal, Optional, Tuple, Union
 
 import aiohttp
+import weakref
 import numpy as np
 from pydantic import BaseModel, Field, ValidationError as PydanticValidationError
 from sentence_transformers import SentenceTransformer
@@ -59,33 +56,60 @@ class ValidationError(NeuralRecallError):
     pass
 
 
+class SkipThresholds:
+    """Threshold configuration for skip logic detection patterns."""
+    
+    # Message length and query limits
+    MAX_MESSAGE_LENGTH = 3000                  # Max characters allowed for an incoming message
+    MIN_QUERY_LENGTH = 10                      # Minimum characters considered a valid query
+    
+    # JSON and structured data detection
+    JSON_KEY_VALUE_THRESHOLD = 5               # Min key:value pairs to consider JSON/structured
+    STRUCTURED_LINE_COUNT_MIN = 3              # Min number of lines before structured heuristics apply
+    STRUCTURED_PERCENTAGE_THRESHOLD = 0.6      # Fraction of lines matching pattern to trigger structured skip
+    STRUCTURED_BULLET_MIN = 4                  # Min bullet-like lines to treat as structured list
+    STRUCTURED_PIPE_MIN = 2                    # Min pipe-count per line to treat as table-like structure
+    
+    # Symbol and character ratio detection
+    SYMBOL_CHECK_MIN_LENGTH = 10               # Min message length before symbol-ratio check runs
+    SYMBOL_RATIO_THRESHOLD = 0.5               # Minimum fraction of alpha/space characters to avoid symbol-skip
+    
+    # URL and log detection
+    URL_COUNT_THRESHOLD = 3                    # Number of URLs considered a URL dump
+    LOGS_LINE_COUNT_MIN = 2                    # Min lines before log-detection heuristics apply
+    LOGS_MIN_MATCHES = 1                       # Minimum matched log-like lines to trigger log skip
+    LOGS_MATCH_PERCENTAGE = 0.30               # Fraction of lines matching log pattern to trigger skip
+
+
 class Config:
-    """Centralized configuration constants for Neural Recall system."""
-
-    CACHE_MAX_SIZE = 2500
-    MAX_USER_CACHES = 500
-
-    MAX_MESSAGE_LENGTH = 3000
-    MAX_MEMORY_CONTENT_LENGTH = 500
-    MIN_QUERY_LENGTH = 10
-
-    TIMEOUT_SESSION_REQUEST = 30
-    TIMEOUT_DATABASE_OPERATION = 10
-    TIMEOUT_USER_LOOKUP = 5
-
-    DEFAULT_SEMANTIC_THRESHOLD = 0.50
+    """Core system configuration constants for Neural Recall."""
     
-    DEFAULT_MAX_MEMORIES_RETURNED = 15 
-    MIN_BATCH_SIZE = 8
-    MAX_BATCH_SIZE = 32
+    # Cache and user limits
+    CACHE_MAX_SIZE = 2500                      # LRU cache max entries per user
+    MAX_USER_CACHES = 500                      # Global limit of per-user caches
+    MAX_MEMORY_CONTENT_LENGTH = 600            # Max characters allowed when creating a memory
 
-    RETRIEVAL_MULTIPLIER = 3.0
-    RETRIEVAL_TIMEOUT = 5.0
-    
-    CONSOLIDATION_CANDIDATE_SIZE = 50
-    CONSOLIDATION_TIMEOUT = 30.0
-    CONSOLIDATION_RELAXED_MULTIPLIER = 0.9
+    # Network and DB timeouts (seconds)
+    TIMEOUT_SESSION_REQUEST = 30               # aiohttp session total timeout
+    TIMEOUT_DATABASE_OPERATION = 10            # Timeout for DB operations
+    TIMEOUT_USER_LOOKUP = 5                    # Timeout for user lookups
 
+    # Semantic retrieval defaults
+    DEFAULT_SEMANTIC_THRESHOLD = 0.50          # Default similarity threshold for retrieval
+    DEFAULT_MAX_MEMORIES_RETURNED = 15         # Default max memories injected into context
+
+    # Embedding batch sizing
+    MIN_BATCH_SIZE = 8                         # Minimum embedding batch size
+    MAX_BATCH_SIZE = 32                        # Maximum embedding batch size
+
+    # Pipeline configuration
+    RETRIEVAL_MULTIPLIER = 3.0                 # Multiplier for candidate memory retrieval
+    RETRIEVAL_TIMEOUT = 5.0                    # Timeout for retrieval operations
+    CONSOLIDATION_CANDIDATE_SIZE = 50          # Max memories for consolidation analysis
+    CONSOLIDATION_TIMEOUT = 30.0               # Timeout for consolidation operations
+    CONSOLIDATION_RELAXED_MULTIPLIER = 0.9     # Relaxed threshold multiplier for consolidation
+
+    # Status messages for skip operations
     STATUS_MESSAGES = {
         'SKIP_EMPTY': 'empty message',
         'SKIP_TOO_LONG': 'message too long',
@@ -98,168 +122,142 @@ class Config:
     }
 
 
-MEMORY_RERANKING_PROMPT = f"""You are the Retrieval Pipeline memory re-ranker. Rapidly select focused, atomic memories that will materially improve the AI's next reply.
+MEMORY_RERANKING_PROMPT = f"""You are the Neural Recall Re-ranker, a high-speed component of the Retrieval Pipeline. Your mission is to rapidly select a small, focused set of memories that will directly and materially improve the quality of the AI's upcoming response. Speed and precision are critical.
 
-Priority memory types (seek these first):
-- Project status, deadlines, and current work context
-- Skills, expertise levels, and tools the user employs  
-- Personal preferences that affect recommendations (dietary, accessibility, work style)
-- Ongoing challenges, goals, or learning objectives
-- Relationships, roles, and professional context
-- Recent events or changes in circumstances
-- Location, time zone, or environmental context that impacts suggestions
-- Health conditions, medications, or wellness routines
-- Financial constraints or goals affecting decisions
-- Family dynamics and caregiving responsibilities
+## 🎯 PRIMARY GOAL
+Your objective is to construct the ideal short-term context for the AI. You are the bridge between the long-term memory store and the AI's immediate awareness. Your selections must be impactful and relevant, prioritizing the high-quality, dense, and factual memories created by the Consolidation Pipeline.
 
-Ranking rules (apply in order):
-1) **Direct relevance**: prefer memories that directly answer or inform the user's question.
-2) **Context boost**: prefer memories that supply missing background (preferences, recent events, open tasks).
-3) **Atomic focus**: favor single-topic memories over complex multi-fact entries that contain irrelevant information.
-4) **Temporal relevance**: prefer recent facts when they change the answer or context significantly.
-5) **Completeness**: ensure selected memories form coherent context without gaps.
-6) **Quality over quantity**: exclude vague personal trivia or marginally related facts.
-7) **Safety priority**: prioritize health, safety, or crisis-related context when relevant.
+## 🏛️ CORE PRINCIPLES
+1.  **Relevance is Paramount:** The primary filter is always the user's most recent message. A memory is only useful if it directly informs or contextualizes the current topic.
+2.  **Factuality First:** Prioritize memories that represent concrete, verifiable facts over subjective statements.
+3.  **Density is Value:** A single, informationally dense memory that consolidates multiple related facts is more valuable than several fragmented ones.
+4.  **Temporal Currency:** The most recent, dated information is the most reliable. Actively seek memories with specific dates that reflect the latest user state.
 
-Output contract:
-- Return ONLY a JSON array of memory IDs (strings) ordered by relevance, highest first.
-- If none materially improve the response, return an empty array.
+---
 
-Examples (LLM must output only the JSON arrays shown):
+### 📜 RANKING HEURISTICS
+Apply these rules in strict order to build the final, ranked list of memory IDs:
 
-1) Health advice request ("I've been having trouble sleeping lately")
-Candidates: ["mem-001: User has chronic insomnia and takes melatonin supplements", "mem-002: User enjoys reading mystery novels", "mem-003: User works night shifts at the hospital as a nurse", "mem-004: User drinks 3 cups of coffee daily including one at 7pm", "mem-005: User has 2-year-old daughter who wakes up frequently", "mem-006: User prefers warm baths before bedtime", "mem-007: User lives in noisy downtown apartment"]
-Expected output:
-["mem-001","mem-003","mem-004","mem-005","mem-007"]
+1.  **Direct Relevance:** Always prioritize memories that directly answer or address a specific question in the user's message.
+2.  **Contextual Enhancement:** After direct hits, select memories that provide essential background context (preferences, goals, constraints) needed for a personalized response.
+3.  **Temporal Precedence:** When memories conflict, the one with the most recent, specific date **always wins**. A memory stating a project was "completed on August 15 2025" supersedes one saying it's "in progress."
+4.  **Informational Density:** Prefer a single, well-consolidated memory over multiple fragmented ones if it covers the topic comprehensively and accurately.
+5.  **Specificity Over Generality:** A specific memory ("User dislikes spicy Thai food") is more valuable than a general one ("User enjoys Asian cuisine").
 
-2) Cooking advice request ("What should I make for dinner tonight?")
-Candidates: ["mem-010: User is vegetarian with severe nut allergy, dislikes spicy food", "mem-011: User enjoys Italian cuisine and prefers quick weeknight meals", "mem-012: User works remotely from home office in Seattle", "mem-013: User bought fresh tomatoes and basil yesterday", "mem-014: User has pasta-making tools and prefers homemade meals", "mem-015: User dislikes cleaning up complex recipes on weekdays"]
-Expected output:
-["mem-010","mem-011","mem-015","mem-013","mem-014"]
+### 🚫 EXCLUSION CRITERIA
+Actively **EXCLUDE** memories that are:
+- **Trivially Related:** General knowledge or personal trivia with no bearing on the current query.
+- **Outdated/Superseded:** Information that has been clearly replaced by a more recent and accurate memory.
+- **Transient:** Memories about temporary states like moods, weather, or speculative plans.
+ - **Anti-Pattern:** Do NOT return memories that merely duplicate or lightly rephrase other high-quality memories; prefer the single most informative memory.
 
-3) Parenting guidance ("How do I handle my teenager's anxiety?")
-Candidates: ["mem-020: User's favorite vacation spot is Bali", "mem-021: User has 15-year-old son with social anxiety disorder", "mem-022: User experienced anxiety during college years", "mem-023: User's son started therapy 3 months ago", "mem-024: User teaches high school mathematics", "mem-025: User's family has history of anxiety disorders"]
-Expected output:
-["mem-021","mem-023","mem-022","mem-025","mem-024"]
+---
 
-4) General conversation with no specific memory relevance
-Candidates: ["mem-030: User's favorite movie is Inception", "mem-031: User works remotely from Seattle", "mem-032: User owns a golden retriever named Max"]
-Expected output:
-[]
+### OUTPUT CONTRACT
+- **RETURN ONLY A JSON ARRAY OF STRINGS.**
+- The strings must be the memory IDs, ordered from most to least relevant.
+- If no candidate memories materially improve the response, return an empty array `[]`.
+- **ABSOLUTELY NO COMMENTARY, EXPLANATIONS, OR CODE FENCES.**
 
-5) Educational planning inquiry ("Should I pursue a master's degree?")
-Candidates: ["mem-040: User has bachelor's degree in psychology from 2018", "mem-041: User currently works as school counselor for 4 years", "mem-042: User wants to specialize in child psychology", "mem-043: User has student loans of $35,000 remaining", "mem-044: User enjoys gardening on weekends", "mem-045: User's employer offers tuition reimbursement program", "mem-046: User considering online vs campus programs"]
-Expected output:
-["mem-040","mem-041","mem-042","mem-043","mem-045","mem-046"]
+---
 
-CRITICAL: Response must be valid JSON (only the array). No commentary, no code fences, no extra fields."""
+### EXAMPLES
 
+**1) Project Status Query ("What's the latest on the Phoenix project?")**
+* **Candidates:** `["mem-101: User is the lead on Project Phoenix, a data migration initiative due on October 1 2025", "mem-102: User is a project manager with a PMP certification", "mem-103: User's main stakeholder for Project Phoenix is named Sarah Jenkins", "mem-104: User is experiencing a blocker on Project Phoenix related to API authentication as of August 14 2025"]`
+* **Expected Output:** `["mem-104","mem-101","mem-103","mem-102"]`
 
-MEMORY_CONSOLIDATION_PROMPT = f"""You are the Consolidation Pipeline memory consolidator. **PRESERVATION IS THE PRIMARY GOAL**. Only consolidate when absolutely necessary for organization.
+**2) Cooking Advice ("What should I make for dinner tonight? I want something quick.")**
+* **Candidates:** `["mem-010: User is vegetarian with a severe nut allergy", "mem-011: User enjoys Italian food", "mem-012: User works from home in Seattle", "mem-013: User bought fresh tomatoes and basil yesterday", "mem-014: User dislikes cleaning up complex recipes on weekdays"]`
+* **Expected Output:** `["mem-010","mem-014","mem-013","mem-011"]`
 
-⚠️ SAFETY RULES - STRICTLY ENFORCE:
-- **DELETE SPARINGLY**: Only for exact duplicates or direct contradictions
-- **PRESERVE INFORMATION**: When in doubt, keep memories separate  
-- **MINIMAL OPERATIONS**: Bias toward NO-OP (empty array) unless clear benefit exists
-- **ATOMICITY PREFERENCE**: Favor granular, single-topic memories over merged ones
-- **ENRICHMENT FOCUS**: Create valuable atomic memories from conversation that enhance future interactions
+**3) NEGATIVE EXAMPLE (Trivially Related)**
+* **User Query:** "Can you recommend a good book about Roman history?"
+* **Candidates:** `["mem-201: User enjoys reading science fiction novels", "mem-202: User has a degree in European History", "mem-203: User's favorite author is Neal Stephenson"]`
+* **Expected Output:** `[]` // The memories are about the user's reading habits, but they don't help in recommending a *Roman history* book. They are not directly relevant to the specific request.
+"""
 
-🎯 PRIMARY FUNCTIONS:
-1. **Memory Enrichment**: Extract atomic, valuable facts from conversation to create new memories
-2. **Organization**: Only consolidate when fragmentation genuinely hinders usefulness
-3. **Preservation**: Protect existing information integrity above cosmetic improvements
+MEMORY_CONSOLIDATION_PROMPT = f"""You are the Neural Recall Consolidator, a meticulous component of the Consolidation Pipeline. Your primary function is to enrich the user's memory profile with high-value, fact-based memories derived from conversation. Your secondary function is to perform database hygiene (merging, updating, splitting) with a strict bias towards **information preservation**.
 
-CONSOLIDATION CRITERIA:
+## 🎯 PRIMARY GOAL
+Your objective is to build a high-fidelity, long-term user profile. The memories you create are the foundation for all future AI interactions. Quality, accuracy, and relevance are paramount. A well-maintained memory store enables the AI to be a truly helpful and context-aware assistant.
 
-**CREATE ONLY WHEN** (memory enrichment from conversation):
-- Conversation reveals new atomic facts about user (preferences, skills, context, goals)
-- Information is specific, actionable, and will improve future AI responses
-- Facts are not already captured in existing memories
-- Content follows format: "User [specific atomic fact]"
+## 🏛️ CORE PRINCIPLES
+1.  **Preservation First:** When in doubt, do nothing. It is safer to have slightly redundant memories than to lose information. Your default action is NO-OP (`[]`).
+2.  **Verifiable Factuality:** You must only record what is **explicitly stated** by the user. Do not infer, assume, or interpret facts not present in the text.
+3.  **Informational Density:** Group closely related details into a single, dense memory. If a user mentions a project's name, its purpose, and its deadline in sequence, combine them into one consolidated fact.
+4.  **Temporal Precedence:** New, dated information always supersedes older, conflicting information. This is the primary trigger for `UPDATE` operations.
+5.  **Contextual Grounding:** Use the provided `Current Date/Time` to convert relative time references (e.g., "yesterday," "next week") into absolute dates (e.g., "August 14 2025," "August 22 2025").
 
-**MERGE ONLY WHEN** (all conditions must be met):
-- Same specific entity (person, project, event) with fragmented facts across multiple memories
-- Information is clearly complementary, not conflicting or overlapping
-- Results in genuinely better organization without any information loss
-- Merged result maintains atomicity (single focused topic)
+---
 
-**SPLIT ONLY WHEN**:
-- Multiple unrelated topics are clearly bundled together inappropriately
-- Different life domains are mixed (work + personal, health + hobbies)
-- Splitting creates more useful, focused atomic memories
+### 📜 EXECUTION RULES
+These rules are mandatory for every operation.
 
-**UPDATE ONLY WHEN**:
-- New information genuinely supersedes or corrects existing memory
-- Temporal progression requires updating status (learning → completed)
-- Clarification improves specificity without losing context
+1.  **Language Mandate:** All memory `content` MUST be in **English**. If the conversation is in another language, you must translate the core, personal facts about the user into English.
+2.  **Strict Prefixing:** Every `content` field **MUST** start with "User" or "User's". There are no exceptions.
+3.  **Date Integration:** When temporal information is present or derivable, always include specific dates in the format "Month Day Year" (e.g., "August 15 2025").
+4.  **Length Constraint:** Memory content must not exceed **{Config.MAX_MEMORY_CONTENT_LENGTH}** characters.
+5.  **Value Filter / Content to Ignore:** You **MUST IGNORE** and **NEVER** create memories from:
+    * **Questions for the AI:** "What is the capital of France?", "How does a neural network work?"
+    * **Conversational Filler:** "Hmm," "let me see," "that's interesting," "oh, right."
+    * **Transient States:** Temporary moods ("I'm feeling tired"), weather, or speculative plans ("I might go to the store later").
+    * **General Knowledge & Opinions:** Impersonal facts, broad opinions, or philosophical statements.
+    * **User's Internal Monologue:** Self-correction or thinking-out-loud phrases ("Wait, no, I meant...").
 
-**DELETE ONLY WHEN** (extremely rare):
-- Exact duplicate with identical meaning exists
-- Direct factual contradiction with clear temporal precedence
-- Information explicitly superseded by user correction
-- User explicitly requests removal
+---
 
-**PREFER NO-OP** - Return [] when:
-- Memories are already well-organized and atomic
-- Changes would be cosmetic rather than functional
-- Any doubt exists about benefit vs. risk of information loss
-- Conversation contains no extractable atomic facts
-- Existing memories adequately cover conversation topics
+### ⚙️ CONSOLIDATION OPERATIONS
+Analyze the user's message and candidate memories to determine if any of the following operations are justified.
 
-Content constraints:
-- Max length: {Config.MAX_MEMORY_CONTENT_LENGTH} characters
-- Start with "User" or "User's" for consistency
-- Preserve all important details and context
-- Maintain temporal specificity when relevant
-- Focus on actionable, specific information
+#### `CREATE` (New, Atomic Fact)
+- **Justification:** The conversation reveals a new, high-value, personal fact that passes the Value Filter and is NOT already captured in existing memories.
+- **Anti-Pattern:** Do NOT create if similar information already exists in memories, even with different wording.
+- **Example:**
+    - **Conversation:** "My daughter is starting kindergarten next month, so I'm adjusting my work schedule to be free in the afternoons."
+    - **Current Date/Time:** "August 15 2025"
+    - **Existing Memories:** `["mem-101: User has a daughter"]`
+    - **Output:** `[{{"operation":"CREATE","content":"User is adjusting their work schedule to be free in the afternoons for their daughter's kindergarten starting in September 2025"}}]`
 
-CONSERVATIVE EXAMPLES:
+#### `UPDATE` (Temporal Progression)
+- **Justification:** New information clearly supersedes or refines an existing memory with SUBSTANTIAL change.
+- **Anti-Pattern:** Do NOT update if the new content is essentially the same as existing memory with only minor rewording.
+- **Example:**
+    - **Conversation:** "I finally finished my PMP certification course yesterday."
+    - **Current Date/Time:** "August 15 2025"
+    - **Existing Memories:** `["mem-201: User is studying for a PMP certification"]`
+    - **Output:** `[{{"operation":"UPDATE","id":"mem-201","content":"User completed their PMP certification on August 14 2025"}}]`
 
-1) Memory enrichment - CREATE justified:
-Conversation: "I've been taking yoga classes twice a week and really love the meditation portion"
-Existing: ["mem-400: User enjoys physical exercise"]
-Output: [{{"operation":"CREATE","content":"User takes yoga classes twice weekly and enjoys meditation"}}]
+#### `MERGE` (Showcasing Informational Density)
+- **Justification:** Multiple fragmented memories about the same entity can be consolidated into a single, dense, and more useful memory with substantial information gain.
+- **Anti-Pattern:** Do NOT merge memories that are already well-organized or where merging would not significantly improve information density.
+- **Example:**
+    - **Conversation:** "The deadline for Project Phoenix is now October 1st. The main stakeholder is Sarah Jenkins. Yesterday, I hit a blocker with the API authentication."
+    - **Current Date/Time:** "August 15 2025"
+    - **Existing Memories:** `["mem-301: User is working on Project Phoenix", "mem-302: Project Phoenix is a data migration initiative"]`
+    - **Output:** `[{{"operation":"UPDATE","id":"mem-301","content":"User is the lead on Project Phoenix, a data migration initiative due on October 1 2025"}}, {{"operation":"DELETE","id":"mem-302"}}, {{"operation":"CREATE","content":"User's main stakeholder for Project Phoenix is named Sarah Jenkins"}}, {{"operation":"CREATE","content":"User is experiencing a blocker on Project Phoenix related to API authentication as of August 14 2025"}}]`
 
-2) Clear fragmentation - MERGE justified:
-Input: ["mem-101: User works at Lincoln Elementary", "mem-102: User is 3rd grade teacher", "mem-103: User has 8 years teaching experience"]
-Output: [{{"operation":"UPDATE","id":"mem-101","content":"User works at Lincoln Elementary as 3rd grade teacher with 8 years experience"}},{{"operation":"DELETE","id":"mem-102"}},{{"operation":"DELETE","id":"mem-103"}}]
+#### `SPLIT` (Enforcing Atomicity)
+- **Justification:** An existing memory inappropriately bundles two or more unrelated atomic facts that would be more useful as separate memories.
+- **Anti-Pattern:** Do NOT split memories that are naturally related or where splitting would reduce coherence without meaningful benefit.
+- **Example:**
+    - **Existing Memories:** `["mem-401: User is a vegetarian and their favorite movie is Blade Runner"]`
+    - **Output:** `[{{"operation":"UPDATE","id":"mem-401","content":"User is a vegetarian"}}, {{"operation":"CREATE","content":"User's favorite movie is Blade Runner"}}]`
 
-3) Topic contamination - SPLIT justified:
-Input: ["mem-201: User prefers Mediterranean diet and has golden retriever named Max"]
-Output: [{{"operation":"UPDATE","id":"mem-201","content":"User prefers Mediterranean diet"}},{{"operation":"CREATE","content":"User has golden retriever named Max"}}]
+#### **NEGATIVE EXAMPLE** (Ignoring Transient/Speculative Content)
+- **Justification:** The user's message contains personal information, but it's speculative and not a stable fact, triggering the Value Filter.
+- **Example:**
+    - **Conversation:** "I'm so tired of this rain. I'm thinking I might take a trip to Spain next year to get some sun. Maybe in the spring."
+    - **Existing Memories:** `["mem-501: User lives in Seattle"]`
+    - **Output:** `[]` // "Thinking I might" and "Maybe" are speculative. This is not a confirmed plan and should not be stored as a memory.
 
-4) Information progression - UPDATE justified:
-Input: ["mem-301: User learning French"]
-Conversation: "I just passed my French B1 certification exam yesterday"
-Output: [{{"operation":"UPDATE","id":"mem-301","content":"User learning French and passed B1 certification exam"}}]
+---
 
-5) Well-organized - NO-OP preferred:
-Input: ["mem-401: User is vegetarian", "mem-402: User lives in Portland", "mem-403: User works as school nurse"]
-Output: [] // Different topics, already atomic
-
-6) Preserve separation - NO-OP preferred:
-Input: ["mem-501: User has diabetes", "mem-502: User takes daily vitamins", "mem-503: User enjoys hiking"]
-Output: [] // Different health/lifestyle domains, maintain granularity
-
-7) Duplicate check — UPDATE vs NO-OP
-Conversation: "I recently moved to the pediatric intensive care unit at Children's Hospital and started full-time this month"
-Existing: ["mem-800: User works as pediatric nurse at Children's Hospital"]
-Output: [{{"operation":"UPDATE","id":"mem-800","content":"User works full-time in the pediatric intensive care unit at Children's Hospital"}}] // Prefer UPDATE only when the change is verified; if uncertain, return []
-
-8) Financial planning enrichment - CREATE justified:
-Conversation: "We're saving for our daughter's college fund and plan to contribute $300 monthly until she's 18"
-Existing: ["mem-900: User has 8-year-old daughter"]
-Output: [{{"operation":"CREATE","content":"User saving for daughter's college fund with $300 monthly contributions until age 18"}}]
-
-🔒 PRESERVATION PRINCIPLES:
-- When uncertain between merge vs. separate, choose separate
-- When uncertain between update vs. create new, choose create new  
-- When uncertain between delete vs. keep, choose keep
-- When uncertain about any operation, choose NO-OP
-- Atomicity trumps organization - prefer granular over consolidated
-- User context richness is more valuable than database tidiness
-
-CRITICAL: When uncertain, choose preservation over consolidation. Return valid JSON array only."""
+### OUTPUT CONTRACT
+- **RETURN ONLY A VALID JSON ARRAY OF OPERATION OBJECTS.**
+- If no operations are needed, return an empty array `[]`.
+- **ABSOLUTELY NO COMMENTARY, EXPLANATIONS, OR CODE FENCES.**
+"""
 
 
 class MemoryOperation(BaseModel):
@@ -474,7 +472,7 @@ class Filter:
 
     async def _generate_embedding(self, text: str, user_id: str) -> np.ndarray:
         """Generate embedding for text with caching support."""
-        if not text or len(text.strip()) < Config.MIN_QUERY_LENGTH:
+        if not text or len(text.strip()) < SkipThresholds.MIN_QUERY_LENGTH:
             raise EmbeddingError("Text too short for embedding generation")
 
         text_hash = hashlib.sha256(text.encode()).hexdigest()
@@ -517,7 +515,7 @@ class Filter:
         uncached_indices = []
         
         for i, text in enumerate(texts):
-            if not text or len(text.strip()) < Config.MIN_QUERY_LENGTH:
+            if not text or len(text.strip()) < SkipThresholds.MIN_QUERY_LENGTH:
                 continue
                 
             text_hash = hashlib.sha256(text.encode()).hexdigest()
@@ -578,9 +576,8 @@ class Filter:
             else:
                 result_embeddings.append(None)
         
-        result_embeddings = [emb for emb in result_embeddings if emb is not None]
-        
-        logger.info(f"🚀 Batch embedding: {len(cached_embeddings)} cached, {len(new_embeddings)} new, {len(result_embeddings)} total")
+        valid_count = len([emb for emb in result_embeddings if emb is not None])
+        logger.info(f"🚀 Batch embedding: {len(cached_embeddings)} cached, {len(new_embeddings)} new, {valid_count}/{len(texts)} valid")
         return result_embeddings
 
     async def _get_aiohttp_session(self) -> aiohttp.ClientSession:
@@ -604,6 +601,13 @@ class Filter:
                         connector=connector,
                         headers={"User-Agent": "NeuralRecallV3/3.0.0"}
                     )
+                    try:
+                        weakref.finalize(
+                            Filter._aiohttp_session,
+                            Filter._auto_cleanup_finalizer,
+                        )
+                    except Exception:
+                        logger.debug("⚠️ Failed to register aiohttp session finalizer")
         return Filter._aiohttp_session
 
     def _should_skip_memory_operations(self, user_message: str) -> Tuple[bool, str]:
@@ -616,8 +620,8 @@ class Filter:
 
         trimmed_message = user_message.strip()
 
-        if len(trimmed_message) > Config.MAX_MESSAGE_LENGTH:
-            return True, f"{Config.STATUS_MESSAGES['SKIP_TOO_LONG']} ({len(trimmed_message)} chars > {Config.MAX_MESSAGE_LENGTH})"
+        if len(trimmed_message) > SkipThresholds.MAX_MESSAGE_LENGTH:
+            return True, f"{Config.STATUS_MESSAGES['SKIP_TOO_LONG']} ({len(trimmed_message)} chars > {SkipThresholds.MAX_MESSAGE_LENGTH})"
 
         code_patterns = [
             r'```[\s\S]*?```',        
@@ -649,22 +653,38 @@ class Filter:
         
         count_lines = lambda pattern: sum(1 for line in message_lines if re.match(pattern, line))
         
-        if ((line_count >= 3 and count_lines(r'^\s*[A-Za-z0-9_]+:\s+\S+') >= max(3, line_count * 0.6)) or
-            (line_count >= 4 and count_lines(r'^\s*[-\*\+]\s+.+') >= max(4, line_count * 0.6)) or
-            re.search(r'^\s*[\{\[].*[\}\]]\s*$', trimmed_message, re.DOTALL)):
+        json_indicators = [
+            r'^\s*[\{\[].*[\}\]]\s*$',
+            r'"[^"]*"\s*:\s*["\{\[\d]',
+            r'["\']?\w+["\']?\s*:\s*["\{\[\d].*["\'\}\]\d]',
+            r'\{\s*["\']?\w+["\']?\s*:\s*\{',
+            r'\[\s*\{.*\}\s*\]',
+        ]
+        
+        for pattern in json_indicators:
+            if re.search(pattern, trimmed_message, re.DOTALL | re.IGNORECASE):
+                return True, Config.STATUS_MESSAGES['SKIP_STRUCTURED']
+        
+        json_kv_pattern = r'["\']?\w+["\']?\s*:\s*["\{\[\d\w]'
+        json_kv_matches = len(re.findall(json_kv_pattern, trimmed_message))
+        if json_kv_matches >= SkipThresholds.JSON_KEY_VALUE_THRESHOLD:
             return True, Config.STATUS_MESSAGES['SKIP_STRUCTURED']
         
-        if len(trimmed_message) > 10 and sum(1 for c in trimmed_message if c.isalpha() or c.isspace()) / len(trimmed_message) < 0.5:
+        if ((line_count >= SkipThresholds.STRUCTURED_LINE_COUNT_MIN and count_lines(r'^\s*[A-Za-z0-9_]+:\s+\S+') >= max(SkipThresholds.STRUCTURED_LINE_COUNT_MIN, line_count * SkipThresholds.STRUCTURED_PERCENTAGE_THRESHOLD)) or
+            (line_count >= SkipThresholds.STRUCTURED_BULLET_MIN and count_lines(r'^\s*[-\*\+]\s+.+') >= max(SkipThresholds.STRUCTURED_BULLET_MIN, line_count * SkipThresholds.STRUCTURED_PERCENTAGE_THRESHOLD))):
+            return True, Config.STATUS_MESSAGES['SKIP_STRUCTURED']
+        
+        if len(trimmed_message) > SkipThresholds.SYMBOL_CHECK_MIN_LENGTH and sum(1 for c in trimmed_message if c.isalpha() or c.isspace()) / len(trimmed_message) < SkipThresholds.SYMBOL_RATIO_THRESHOLD:
             return True, Config.STATUS_MESSAGES['SKIP_SYMBOLS']
         
-        if (line_count >= 3 and 
-            (sum(1 for line in message_lines if '|' in line and line.count('|') >= 2) >= max(2, line_count * 0.6) or
-             count_lines(r'^\s*\d+\.\s') >= max(3, line_count * 0.6) or
-             count_lines(r'^\s*[a-zA-Z]\)\s') >= max(3, line_count * 0.6))):
+        if (line_count >= SkipThresholds.STRUCTURED_LINE_COUNT_MIN and 
+            (sum(1 for line in message_lines if '|' in line and line.count('|') >= SkipThresholds.STRUCTURED_PIPE_MIN) >= max(SkipThresholds.STRUCTURED_PIPE_MIN, line_count * SkipThresholds.STRUCTURED_PERCENTAGE_THRESHOLD) or
+             count_lines(r'^\s*\d+\.\s') >= max(SkipThresholds.STRUCTURED_LINE_COUNT_MIN, line_count * SkipThresholds.STRUCTURED_PERCENTAGE_THRESHOLD) or
+             count_lines(r'^\s*[a-zA-Z]\)\s') >= max(SkipThresholds.STRUCTURED_LINE_COUNT_MIN, line_count * SkipThresholds.STRUCTURED_PERCENTAGE_THRESHOLD))):
             return True, Config.STATUS_MESSAGES['SKIP_STRUCTURED']
         
-        if line_count >= 2:
-            if sum(1 for line in message_lines if re.search(r'\d{2,4}[-/]\d{1,2}[-/]\d{1,2}.*\d{1,2}:\d{2}', line)) >= max(1, line_count * 0.3):
+        if line_count >= SkipThresholds.LOGS_LINE_COUNT_MIN:
+            if sum(1 for line in message_lines if re.search(r'\d{2,4}[-/]\d{1,2}[-/]\d{1,2}.*\d{1,2}:\d{2}', line)) >= max(SkipThresholds.LOGS_MIN_MATCHES, line_count * SkipThresholds.LOGS_MATCH_PERCENTAGE):
                 return True, Config.STATUS_MESSAGES['SKIP_LOGS']
             
             stack_patterns = [
@@ -691,10 +711,10 @@ class Filter:
             if re.search(pattern, trimmed_message, re.IGNORECASE):
                 return True, Config.STATUS_MESSAGES['SKIP_LOGS']
         
-        if len(re.findall(r'https?://[^\s]+', trimmed_message)) >= 3:
+        if len(re.findall(r'https?://[^\s]+', trimmed_message)) >= SkipThresholds.URL_COUNT_THRESHOLD:
             return True, Config.STATUS_MESSAGES['SKIP_URL_DUMP']
         
-        if len(trimmed_message) < Config.MIN_QUERY_LENGTH:
+        if len(trimmed_message) < SkipThresholds.MIN_QUERY_LENGTH:
             return True, Config.STATUS_MESSAGES['SKIP_EMPTY']
 
         return False, ""
@@ -754,14 +774,23 @@ class Filter:
         message: str,
         done: bool = False,
     ) -> None:
-        """Emit status message through the event emitter."""
-        if emitter:
-            await emitter(
-                {
-                    "type": "status",
-                    "data": {"description": message, "done": done},
-                }
-            )
+        """Emit status message through the event emitter with fault tolerance."""
+        if not emitter:
+            return
+            
+        payload = {
+            "type": "status",
+            "data": {"description": message, "done": done},
+        }
+        
+        try:
+            result = emitter(payload)
+            if asyncio.iscoroutine(result):
+                await asyncio.wait_for(result, timeout=1.0)
+        except asyncio.TimeoutError:
+            logger.info(f"⏳ Event emitter timed out for message: {message}")
+        except Exception as e:
+            logger.info(f"⚠️ Event emitter failed for message '{message}': {e}")
 
     async def _broad_retrieval(self, user_message: str, user_id: str, emitter: Optional[Callable[[Any], Awaitable[None]]] = None) -> List[Dict[str, Any]]:
         """Step 1 of Retrieval Pipeline: Perform broad vector search for candidate memories."""
@@ -793,6 +822,9 @@ class Filter:
         
         for i, memory in enumerate(user_memories):
             memory_embedding = memory_embeddings[i]
+            if memory_embedding is None:
+                continue
+            
             similarity = float(np.dot(query_embedding, memory_embedding))
             
             if similarity >= self.valves.semantic_threshold :
@@ -915,6 +947,9 @@ class Filter:
         
         for i, memory in enumerate(user_memories):
             memory_embedding = memory_embeddings[i]
+            if memory_embedding is None:
+                continue
+            
             similarity = float(np.dot(query_embedding, memory_embedding))
             
             if similarity >= relaxed_threshold:
@@ -947,7 +982,7 @@ class Filter:
         
         return formatted_memories
 
-    async def _llm_consolidate_memories(self, user_message: str, conversation_context: str, candidate_memories: List[Dict[str, Any]], emitter: Optional[Callable[[Any], Awaitable[None]]] = None) -> List[Dict[str, Any]]:
+    async def _llm_consolidate_memories(self, user_message: str, candidate_memories: List[Dict[str, Any]], emitter: Optional[Callable[[Any], Awaitable[None]]] = None) -> List[Dict[str, Any]]:
         """Step 2 of Consolidation Pipeline: Use LLM to generate consolidation plan."""
         if not candidate_memories:
             return []
@@ -961,7 +996,7 @@ class Filter:
                 memory_context += f"Updated: {memory['updated_at']}\n"
             memory_context += "\n"
         
-        context_section = f"## CONVERSATION CONTEXT\nUser Message: {user_message}\nFull Context: {conversation_context}\n\n"
+        context_section = f"## USER MESSAGE\n{user_message}\n\n"
         
         date_context = f"## CURRENT DATE/TIME\n{self.get_formatted_datetime_string()}\n\n"
         
@@ -1031,19 +1066,27 @@ class Filter:
         created_count = 0
         updated_count = 0
         deleted_count = 0
+        failed_count = 0
         
-        for operation_data in operations:
-            operation = MemoryOperation(**operation_data)
-            result = await self._execute_single_operation(operation, user)
-            if result == "CREATE":
-                created_count += 1
-            elif result == "UPDATE":
-                updated_count += 1
-            elif result == "DELETE":
-                deleted_count += 1
+        for i, operation_data in enumerate(operations):
+            try:
+                operation = MemoryOperation(**operation_data)
+                result = await self._execute_single_operation(operation, user)
+                if result == "CREATE":
+                    created_count += 1
+                elif result == "UPDATE":
+                    updated_count += 1
+                elif result == "DELETE":
+                    deleted_count += 1
+            except Exception as e:
+                failed_count += 1
+                operation_type = operation_data.get("operation", "UNKNOWN")
+                operation_id = operation_data.get("id", "no-id")
+                logger.error(f"❌ Failed to execute {operation_type} operation {i+1}/{len(operations)} (ID: {operation_id}): {str(e)}")
+                continue
         
         total_executed = created_count + updated_count + deleted_count
-        logger.info(f"✅ Consolidation Pipeline: Executed {total_executed}/{len(operations)} operations (Created: {created_count}, Updated: {updated_count}, Deleted: {deleted_count})")
+        logger.info(f"✅ Consolidation Pipeline: Executed {total_executed}/{len(operations)} operations (Created: {created_count}, Updated: {updated_count}, Deleted: {deleted_count}, Failed: {failed_count})")
         
         if total_executed > 0:
             result_parts = []
@@ -1056,34 +1099,46 @@ class Filter:
 
             suffix = "memory" if total_executed == 1 else "memories"
             message = ", ".join(result_parts) + f" {suffix}"
+            
+            if failed_count > 0:
+                message += f" ({failed_count} failed)"
+                
             await self._emit_status(emitter, message, True)
             
             await self._invalidate_user_cache(user_id, "consolidation")
+        elif failed_count > 0:
+            await self._emit_status(emitter, f"⚠️ {failed_count}/{len(operations)} operations failed", True)
         else:
             await self._emit_status(emitter, "✅ Memories already optimally organized", True)
 
-    async def _consolidation_pipeline_task(self, user_message: str, conversation_context: str, user_id: str, emitter: Optional[Callable[[Any], Awaitable[None]]] = None) -> None:
+    async def _consolidation_pipeline_task(self, user_message: str, user_id: str, emitter: Optional[Callable[[Any], Awaitable[None]]] = None) -> None:
         """Complete Consolidation Pipeline as async background task (formerly Slow Path)."""
-        logger.info("🔧 Starting Consolidation Pipeline analysis")
-        await self._emit_status(emitter, "🔧 Analyzing memory patterns...", False)
-        
-        candidates = await self._gather_consolidation_candidates(user_message, user_id, emitter)
-        
-        if not candidates:
-            logger.info("🔧 Consolidation Pipeline: No candidates found")
-            await self._emit_status(emitter, "💭 No consolidation candidates", True)
-            return
-        
-        operations = await self._llm_consolidate_memories(user_message, conversation_context, candidates, emitter)
-        
-        if not operations:
-            logger.info("🔧 Consolidation Pipeline: Memories already optimally organized - no consolidation required")
-            await self._emit_status(emitter, "✅ Memories already well organized", True)
-            return
-        
-        await self._execute_consolidation_operations(operations, user_id, emitter)
-        
-        logger.info("🔧 Consolidation Pipeline completed successfully")
+        try:
+            logger.info("🔧 Starting Consolidation Pipeline analysis")
+            await self._emit_status(emitter, "🔧 Analyzing memory patterns...", False)
+            
+            candidates = await self._gather_consolidation_candidates(user_message, user_id, emitter)
+            
+            if not candidates:
+                logger.info("🔧 Consolidation Pipeline: No candidates found")
+                await self._emit_status(emitter, "💭 No consolidation candidates", True)
+                return
+            
+            operations = await self._llm_consolidate_memories(user_message, candidates, emitter)
+            
+            if not operations:
+                logger.info("🔧 Consolidation Pipeline: Memories already optimally organized - no consolidation required")
+                await self._emit_status(emitter, "✅ Memories already well organized", True)
+                return
+            
+            await self._execute_consolidation_operations(operations, user_id, emitter)
+            
+            logger.info("🔧 Consolidation Pipeline completed successfully")
+            
+        except Exception as e:
+            logger.error(f"❌ Consolidation Pipeline failed: {str(e)}")
+            await self._emit_status(emitter, f"❌ Consolidation failed: {str(e)[:50]}", True)
+            raise
 
 
     async def inlet(
@@ -1099,6 +1154,8 @@ class Filter:
         if not body or not __user__:
             return body
 
+        user_id = __user__["id"]
+
         if "messages" in body and body["messages"]:
             last_user_msg = next(
                 (
@@ -1110,10 +1167,10 @@ class Filter:
             )
             
             if not last_user_msg:
+                self._inject_datetime_context(body)
                 return body
                 
             user_message = last_user_msg
-            user_id = __user__["id"]
 
             should_skip, skip_reason = self._should_skip_memory_operations(user_message)
             if should_skip:
@@ -1156,6 +1213,8 @@ class Filter:
         if not body or not __user__:
             return body
 
+        user_id = __user__["id"]
+
         if "messages" in body and body["messages"]:
             user_message = next(
                 (
@@ -1172,24 +1231,25 @@ class Filter:
                     logger.info(f"⏭️ Consolidation Pipeline skipped: {skip_reason}")
                     return body
 
-                conversation_context = ""
-                for message in body["messages"]:
-                    role = message.get("role", "")
-                    content = self._extract_text_from_message_content(message.get("content", ""))
-                    if content:
-                        conversation_context += f"[{role}]: {content}\n"
-
-                user_id = __user__["id"]
-
                 logger.info("🔧 Starting Consolidation Pipeline background consolidation")
                 task = asyncio.create_task(
-                    self._consolidation_pipeline_task(user_message, conversation_context, user_id, __event_emitter__)
+                    self._consolidation_pipeline_task(user_message, user_id, __event_emitter__)
                 )
-                task.add_done_callback(
-                    lambda t: logger.error(f"❌ Consolidation pipeline task failed: {t.exception()}") 
-                    if t.exception() else None
-                )
-
+                
+                def handle_task_completion(completed_task):
+                    if completed_task.exception():
+                        exception = completed_task.exception()
+                        logger.error(f"❌ Consolidation pipeline task failed: {exception}")
+                        if __event_emitter__:
+                            try:
+                                asyncio.create_task(self._emit_status(__event_emitter__, "❌ Consolidation failed", True))
+                            except Exception as emit_error:
+                                logger.error(f"❌ Failed to emit final error status: {emit_error}")
+                    else:
+                        logger.info("✅ Consolidation pipeline task completed successfully")
+                
+                task.add_done_callback(handle_task_completion)
+                
         return body
 
 
@@ -1206,7 +1266,6 @@ class Filter:
                 
                 if user_id in Filter._cache_access_order:
                     Filter._cache_access_order.remove(user_id)
-                    Filter._cache_access_order.append(user_id)
 
     def _clean_memory_content(self, content: str) -> str:
         """Clean memory content and validate length limits."""
@@ -1282,7 +1341,7 @@ class Filter:
             ],
             "temperature": 0.1,
             "top_p": 0.9,
-            "max_tokens": 2048,
+            "max_tokens": 4096,
         }
 
         if json_response:
@@ -1390,18 +1449,30 @@ class Filter:
             if cls._aiohttp_session and not cls._aiohttp_session.closed:
                 await cls._aiohttp_session.close()
                 logger.info("✅ HTTP session closed gracefully")
+                
         except Exception as e:
             logger.error(f"❌ Error during cleanup: {e}")
+
+    @classmethod
+    def _auto_cleanup_finalizer(cls) -> None:
+        """Synchronous finalizer called when the session object is GC'd."""
+        try:
+            loop = None
+            try:
+                loop = asyncio.get_event_loop()
+            except Exception:
+                loop = None
+            if loop and loop.is_running():
+                loop.call_soon_threadsafe(asyncio.create_task, cls.cleanup())
+            else:
+                logger.warning("⚠️ aiohttp session finalized without running event loop; call await Filter.cleanup() for graceful shutdown")
+        except Exception as e:
+            logger.error(f"❌ Error in session finalizer: {e}")
     
     def __del__(self):
-        """Destructor to ensure cleanup (production safety)."""
+        """Destructor - logs warning if cleanup wasn't called explicitly."""
         try:
-            if hasattr(self, '_aiohttp_session') and self._aiohttp_session and not self._aiohttp_session.closed:
-                try:
-                    loop = asyncio.get_event_loop()
-                    if loop.is_running():
-                        loop.create_task(self.cleanup())
-                except:
-                    pass
+            if hasattr(self.__class__, '_aiohttp_session') and self.__class__._aiohttp_session and not self.__class__._aiohttp_session.closed:
+                logger.debug("Filter instance finalized; aiohttp session still open (finalizer may handle cleanup)")
         except:
             pass
