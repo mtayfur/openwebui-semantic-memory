@@ -993,12 +993,10 @@ class Filter:
         existing_memory_ids = {memory["id"] for memory in candidate_memories}
         valid_operations = []
         
-        # Safety check: Prevent excessive deletions that could cause memory loss
         total_operations = len(operations)
         delete_operations = [op for op in operations if isinstance(op, dict) and op.get("operation") == "DELETE"]
         delete_ratio = len(delete_operations) / total_operations if total_operations > 0 else 0
         
-        # If more than 50% of operations are deletions, this is likely aggressive over-consolidation
         if delete_ratio > 0.5 and total_operations >= 3:
             logger.warning(f"⚠️ Consolidation safety trigger: {len(delete_operations)}/{total_operations} operations are deletions ({delete_ratio*100:.1f}%)")
             logger.warning("⚠️ Rejecting consolidation plan to prevent excessive memory loss")
