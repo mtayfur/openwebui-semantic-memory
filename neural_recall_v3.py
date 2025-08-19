@@ -100,7 +100,7 @@ class Config:
     # Cache and user limits
     CACHE_MAX_SIZE = 2500  # LRU cache max entries per user
     MAX_USER_CACHES = 500  # Global limit of per-user caches
-    MAX_MEMORY_CONTENT_LENGTH = 600  # Max characters allowed when creating a memory
+    MAX_MEMORY_CONTENT_LENGTH = 500  # Max characters allowed when creating a memory
 
     # Network and DB timeouts (seconds)
     TIMEOUT_SESSION_REQUEST = 30  # aiohttp session total timeout
@@ -135,7 +135,7 @@ class Config:
         "SKIP_EMPTY": "🔍 Message too short to process",
         "SKIP_TOO_LONG": "📄 Message too long to process",
         "SKIP_CODE": "💻 Code content detected, skipping memory operations",
-        "SKIP_STRUCTURED": "📊 Structured data detected, skipping memory operations", 
+        "SKIP_STRUCTURED": "📊 Structured data detected, skipping memory operations",
         "SKIP_SYMBOLS": "🔢 Symbol heavy content detected, skipping memory operations",
         "SKIP_LOGS": "📝 Log content detected, skipping memory operations",
         "SKIP_STACKTRACE": "⚠️ Stack trace detected, skipping memory operations",
@@ -151,7 +151,7 @@ Your objective is to construct the ideal short-term context for the AI. You are 
 ## 🏛️ CORE PRINCIPLES
 1.  **Relevance is Paramount:** The primary filter is always the user's most recent message. A memory is only useful if it directly informs or contextualizes the current topic.
 2.  **Factuality First:** Prioritize memories that represent concrete, verifiable facts over subjective statements.
-3.  **Density is Value:** A single, informationally dense memory that consolidates multiple related facts is more valuable than several fragmented ones.
+3.  **Thematic Separation:** Select memories with distinct thematic focus - prefer precise single-topic memories over broad multi-topic ones.
 4.  **Temporal Currency:** The most recent, dated information is the most reliable. Actively seek memories with specific dates that reflect the latest user state.
 
 ---
@@ -161,8 +161,8 @@ Apply these rules in strict order to build the final, ranked list of memory IDs:
 
 1.  **Direct Relevance:** Always prioritize memories that directly answer or address a specific question in the user's message.
 2.  **Contextual Enhancement:** After direct hits, select memories that provide essential background context (preferences, goals, constraints) needed for a personalized response.
-3.  **Temporal Precedence:** When memories conflict, the one with the most recent, specific date **always wins**. A memory stating a project was "completed on August 15 2025" supersedes one saying it's "in progress."
-4.  **Informational Density:** Prefer a single, well-consolidated memory over multiple fragmented ones if it covers the topic comprehensively and accurately.
+3.  **Thematic Focus:** Prioritize memories with single-concept clarity over those mixing multiple unrelated topics.
+4.  **Temporal Precedence:** When memories conflict, the one with the most recent, specific date **always wins**. A memory stating a project was "completed on August 15 2025" supersedes one saying it's "in progress."
 5.  **Specificity Over Generality:** A specific memory ("User dislikes spicy Thai food") is more valuable than a general one ("User enjoys Asian cuisine").
 
 ### 🚫 EXCLUSION CRITERIA
@@ -170,7 +170,8 @@ Actively **EXCLUDE** memories that are:
 - **Trivially Related:** General knowledge or personal trivia with no bearing on the current query.
 - **Outdated/Superseded:** Information that has been clearly replaced by a more recent and accurate memory.
 - **Transient:** Memories about temporary states like moods, weather, or speculative plans.
- - **Anti-Pattern:** Do NOT return memories that merely duplicate or lightly rephrase other high-quality memories; prefer the single most informative memory.
+- **Mixed Topics:** Memories that cram multiple unrelated concepts together (violates Thematic Separation).
+- **Anti-Pattern:** Do NOT return memories that merely duplicate or lightly rephrase other high-quality memories; prefer the single most informative memory.
 
 ---
 
@@ -206,7 +207,7 @@ Your objective is to build a high-fidelity, long-term user profile. The memories
 ## 🏛️ CORE PRINCIPLES
 1.  **Preservation First:** When in doubt, do nothing. It is safer to have slightly redundant memories than to lose information. Your default action is NO-OP (`[]`).
 2.  **Verifiable Factuality:** You must only record what is **explicitly stated** by the user. Do not infer, assume, or interpret facts not present in the text.
-3.  **Informational Density:** Group closely related details into a single, dense memory. If a user mentions a project's name, its purpose, and its deadline in sequence, combine them into one consolidated fact.
+3.  **Thematic Separation:** Each memory contains ONE distinct concept or fact category - never mix unrelated information types.
 4.  **Temporal Precedence:** New, dated information always supersedes older, conflicting information. This is the primary trigger for `UPDATE` operations.
 5.  **Contextual Grounding:** Use the provided `Current Date/Time` to convert relative time references (e.g., "yesterday," "next week") into absolute dates (e.g., "August 14 2025," "August 22 2025").
 
@@ -218,13 +219,7 @@ These rules are mandatory for every operation.
 1.  **Language Mandate:** All memory `content` MUST be in **English**. If the conversation is in another language, you must translate the core, personal facts about the user into English.
 2.  **Strict Prefixing:** Every `content` field **MUST** start with "User" or "User's". There are no exceptions.
 3.  **Date Integration:** When temporal information is present or derivable, always include specific dates in the format "Month Day Year" (e.g., "August 15 2025").
-4.  **Length Constraint:** Memory content must not exceed **{Config.MAX_MEMORY_CONTENT_LENGTH}** characters.
-5.  **Value Filter / Content to Ignore:** You **MUST IGNORE** and **NEVER** create memories from:
-    * **Questions for the AI:** "What is the capital of France?", "How does a neural network work?"
-    * **Conversational Filler:** "Hmm," "let me see," "that's interesting," "oh, right."
-    * **Transient States:** Temporary moods ("I'm feeling tired"), weather, or speculative plans ("I might go to the store later").
-    * **General Knowledge & Opinions:** Impersonal facts, broad opinions, or philosophical statements.
-    * **User's Internal Monologue:** Self-correction or thinking-out-loud phrases ("Wait, no, I meant...").
+4.  **Value Filter:** You **MUST IGNORE** and **NEVER** create memories from: Questions for the AI, conversational filler, transient states, general knowledge, or user's internal monologue.
 
 ---
 
@@ -233,16 +228,15 @@ Analyze the user's message and candidate memories to determine if any of the fol
 
 #### `CREATE` (New, Atomic Fact)
 - **Justification:** The conversation reveals a new, high-value, personal fact that passes the Value Filter and is NOT already captured in existing memories.
-- **Anti-Pattern:** Do NOT create if similar information already exists in memories, even with different wording.
+- **Thematic Separation:** Create separate memories for distinct concepts (schedule changes vs. education milestones).
 - **Example:**
     - **Conversation:** "My daughter is starting kindergarten next month, so I'm adjusting my work schedule to be free in the afternoons."
     - **Current Date/Time:** "August 15 2025"
     - **Existing Memories:** `["mem-101: User has a daughter"]`
-    - **Output:** `[{{"operation":"CREATE","content":"User is adjusting their work schedule to be free in the afternoons for their daughter's kindergarten starting in September 2025"}}]`
+    - **Output:** `[{{"operation":"CREATE","content":"User's daughter is starting kindergarten in September 2025"}}, {{"operation":"CREATE","content":"User is adjusting work schedule to be free in afternoons starting September 2025"}}]`
 
 #### `UPDATE` (Temporal Progression)
 - **Justification:** New information clearly supersedes or refines an existing memory with SUBSTANTIAL change.
-- **Anti-Pattern:** Do NOT update if the new content is essentially the same as existing memory with only minor rewording.
 - **Example:**
     - **Conversation:** "I finally finished my PMP certification course yesterday."
     - **Current Date/Time:** "August 15 2025"
@@ -250,27 +244,31 @@ Analyze the user's message and candidate memories to determine if any of the fol
     - **Output:** `[{{"operation":"UPDATE","id":"mem-201","content":"User completed their PMP certification on August 14 2025"}}]`
 
 #### `MERGE` (Showcasing Informational Density)
-- **Justification:** Multiple fragmented memories about the same entity can be consolidated into a single, dense, and more useful memory with substantial information gain.
-- **Anti-Pattern:** Do NOT merge memories that are already well-organized or where merging would not significantly improve information density.
+- **Justification:** Multiple fragmented memories about the SAME entity can be consolidated into a single, dense memory ONLY when they share thematic coherence.
+- **Thematic Separation Rule:** Only merge memories within the same concept category (all project details, all health data, etc.).
 - **Example:**
-    - **Conversation:** "The deadline for Project Phoenix is now October 1st. The main stakeholder is Sarah Jenkins. Yesterday, I hit a blocker with the API authentication."
+    - **Conversation:** "The deadline for Project Phoenix is now October 1st. The main stakeholder is Sarah Jenkins."
     - **Current Date/Time:** "August 15 2025"
     - **Existing Memories:** `["mem-301: User is working on Project Phoenix", "mem-302: Project Phoenix is a data migration initiative"]`
-    - **Output:** `[{{"operation":"UPDATE","id":"mem-301","content":"User is the lead on Project Phoenix, a data migration initiative due on October 1 2025"}}, {{"operation":"DELETE","id":"mem-302"}}, {{"operation":"CREATE","content":"User's main stakeholder for Project Phoenix is named Sarah Jenkins"}}, {{"operation":"CREATE","content":"User is experiencing a blocker on Project Phoenix related to API authentication as of August 14 2025"}}]`
+    - **Output:** `[{{"operation":"UPDATE","id":"mem-301","content":"User is the lead on Project Phoenix, a data migration initiative due on October 1 2025"}}, {{"operation":"DELETE","id":"mem-302"}}, {{"operation":"CREATE","content":"User's main stakeholder for Project Phoenix is named Sarah Jenkins"}}]`
 
 #### `SPLIT` (Enforcing Atomicity)
-- **Justification:** An existing memory bundles distinct atomic facts that should be separated for better precision. Prefer atomic, single-concept memories over merged ones unless topics are highly contextually dependent.
-- **Anti-Pattern:** Only merge memories when topics are inseparably linked and splitting would fragment essential context. Default to atomic separation for better retrieval precision.
+- **Justification:** An existing memory bundles distinct atomic facts that violate Thematic Separation and should be separated for better precision.
 - **Example:**
     - **Existing Memories:** `["mem-401: User is a vegetarian and their favorite movie is Blade Runner"]`
     - **Output:** `[{{"operation":"UPDATE","id":"mem-401","content":"User is a vegetarian"}}, {{"operation":"CREATE","content":"User's favorite movie is Blade Runner"}}]`
 
-#### **NEGATIVE EXAMPLE** (Ignoring Transient/Speculative Content)
-- **Justification:** The user's message contains personal information, but it's speculative and not a stable fact, triggering the Value Filter.
-- **Example:**
-    - **Conversation:** "I'm so tired of this rain. I'm thinking I might take a trip to Spain next year to get some sun. Maybe in the spring."
-    - **Existing Memories:** `["mem-501: User lives in Seattle"]`
-    - **Output:** `[]` // "Thinking I might" and "Maybe" are speculative. This is not a confirmed plan and should not be stored as a memory.
+---
+
+## ⚠️ CRITICAL: {Config.MAX_MEMORY_CONTENT_LENGTH} CHARACTER LIMIT
+** Every memory content MUST be under {Config.MAX_MEMORY_CONTENT_LENGTH} characters. Violations cause operation failures.
+
+**ATOMIC MEMORY STRATEGY:**
+- **Thematic Separation:** Different information categories (dates, measurements, locations, relationships, symptoms, treatments) MUST be separate memories
+- **Single Concept:** Each memory contains ONE retrievable thematic fact - never mix unrelated information types
+- **No Cramming:** Resist the urge to combine multiple distinct facts into one memory for "efficiency"
+
+**DEFAULT TO CREATION OVER UPDATING WHEN MEMORIES ARE LONG**
 
 ---
 
@@ -663,7 +661,7 @@ class Filter:
 
         if len(trimmed_message) < SkipThresholds.MIN_QUERY_LENGTH:
             return True, Config.STATUS_MESSAGES["SKIP_EMPTY"]
-        
+
         if len(trimmed_message) > SkipThresholds.MAX_MESSAGE_LENGTH:
             return (
                 True,
@@ -712,7 +710,10 @@ class Filter:
             r"^\s*\{\s*\}\s*$",
             r"<[^>]+>[\s\S]*</[^>]+>",
         ]
-        return any(re.search(pattern, message, re.MULTILINE | re.IGNORECASE) for pattern in code_patterns)
+        return any(
+            re.search(pattern, message, re.MULTILINE | re.IGNORECASE)
+            for pattern in code_patterns
+        )
 
     def _is_structured_data(self, message: str) -> bool:
         """Check if message contains structured data patterns."""
@@ -723,38 +724,55 @@ class Filter:
             r'\{\s*["\']?\w+["\']?\s*:\s*\{',
             r"\[\s*\{.*\}\s*\]",
         ]
-        
-        if any(re.search(pattern, message, re.DOTALL | re.IGNORECASE) for pattern in json_indicators):
+
+        if any(
+            re.search(pattern, message, re.DOTALL | re.IGNORECASE)
+            for pattern in json_indicators
+        ):
             return True
 
         json_kv_pattern = r'["\']?\w+["\']?\s*:\s*["\{\[\d\w]'
-        if len(re.findall(json_kv_pattern, message)) >= SkipThresholds.JSON_KEY_VALUE_THRESHOLD:
+        if (
+            len(re.findall(json_kv_pattern, message))
+            >= SkipThresholds.JSON_KEY_VALUE_THRESHOLD
+        ):
             return True
 
         message_lines = message.split("\n")
         line_count = len(message_lines)
-        
+
         if line_count < SkipThresholds.STRUCTURED_LINE_COUNT_MIN:
             return False
 
-        count_lines = lambda pattern: sum(1 for line in message_lines if re.match(pattern, line))
-        threshold = max(SkipThresholds.STRUCTURED_LINE_COUNT_MIN, line_count * SkipThresholds.STRUCTURED_PERCENTAGE_THRESHOLD)
+        count_lines = lambda pattern: sum(
+            1 for line in message_lines if re.match(pattern, line)
+        )
+        threshold = max(
+            SkipThresholds.STRUCTURED_LINE_COUNT_MIN,
+            line_count * SkipThresholds.STRUCTURED_PERCENTAGE_THRESHOLD,
+        )
 
         structured_checks = [
             count_lines(r"^\s*[A-Za-z0-9_]+:\s+\S+") >= threshold,
-            count_lines(r"^\s*[-\*\+]\s+.+") >= max(SkipThresholds.STRUCTURED_BULLET_MIN, threshold),
+            count_lines(r"^\s*[-\*\+]\s+.+")
+            >= max(SkipThresholds.STRUCTURED_BULLET_MIN, threshold),
             count_lines(r"^\s*\d+\.\s") >= threshold,
             count_lines(r"^\s*[a-zA-Z]\)\s") >= threshold,
-            sum(1 for line in message_lines if "|" in line and line.count("|") >= SkipThresholds.STRUCTURED_PIPE_MIN) >= max(SkipThresholds.STRUCTURED_PIPE_MIN, threshold)
+            sum(
+                1
+                for line in message_lines
+                if "|" in line and line.count("|") >= SkipThresholds.STRUCTURED_PIPE_MIN
+            )
+            >= max(SkipThresholds.STRUCTURED_PIPE_MIN, threshold),
         ]
-        
+
         return any(structured_checks)
 
     def _is_mostly_symbols(self, message: str) -> bool:
         """Check if message is mostly symbols/numbers."""
         if len(message) <= SkipThresholds.SYMBOL_CHECK_MIN_LENGTH:
             return False
-        
+
         alpha_space_count = sum(1 for c in message if c.isalpha() or c.isspace())
         return alpha_space_count / len(message) < SkipThresholds.SYMBOL_RATIO_THRESHOLD
 
@@ -762,7 +780,7 @@ class Filter:
         """Check if message contains log patterns."""
         message_lines = message.split("\n")
         line_count = len(message_lines)
-        
+
         single_line_error_patterns = [
             r"(NameError|TypeError|ValueError|AttributeError|KeyError|SyntaxError|IndentationError).*:",
             r"\d{2,4}[-/]\d{1,2}[-/]\d{1,2}[\s\d:]+\b(ERROR|WARN|INFO|DEBUG)\b",
@@ -771,18 +789,25 @@ class Filter:
             r"^\s*at\s+\w+.*\([^)]*:\d+:\d+\)",
             r"Exception\s+in\s+thread",
         ]
-        
-        if any(re.search(pattern, message, re.IGNORECASE) for pattern in single_line_error_patterns):
+
+        if any(
+            re.search(pattern, message, re.IGNORECASE)
+            for pattern in single_line_error_patterns
+        ):
             return True
-        
+
         if line_count < SkipThresholds.LOGS_LINE_COUNT_MIN:
             return False
 
         datetime_matches = sum(
-            1 for line in message_lines 
+            1
+            for line in message_lines
             if re.search(r"\d{2,4}[-/]\d{1,2}[-/]\d{1,2}.*\d{1,2}:\d{2}", line)
         )
-        if datetime_matches >= max(SkipThresholds.LOGS_MIN_MATCHES, line_count * SkipThresholds.LOGS_MATCH_PERCENTAGE):
+        if datetime_matches >= max(
+            SkipThresholds.LOGS_MIN_MATCHES,
+            line_count * SkipThresholds.LOGS_MATCH_PERCENTAGE,
+        ):
             return True
 
         return False
@@ -790,7 +815,7 @@ class Filter:
     def _is_stack_trace(self, message: str) -> bool:
         """Check if message contains stack trace patterns."""
         message_lines = message.split("\n")
-        
+
         stack_patterns = [
             r"^\s*(at|File|Traceback|Exception|Error).*:\d+",
             r"Traceback\s*\(most recent call",
@@ -799,8 +824,11 @@ class Filter:
             r"Exception\s+in\s+thread",
             r"^\s*(NameError|TypeError|ValueError|AttributeError|KeyError):",
         ]
-        
-        return any(any(re.search(pattern, line) for pattern in stack_patterns) for line in message_lines)
+
+        return any(
+            any(re.search(pattern, line) for pattern in stack_patterns)
+            for line in message_lines
+        )
 
     def _is_url_dump(self, message: str) -> bool:
         """Check if message contains multiple URLs (URL dump)."""
@@ -836,14 +864,25 @@ class Filter:
             raise NeuralRecallError(f"Failed to format datetime: {e}")
 
     def _get_conversation_id(self, body: Dict[str, Any]) -> str:
-        """Extract conversation ID from OpenWebUI request body using metadata.chat_id or first message ID."""
-        if 'metadata' in body and isinstance(body['metadata'], dict):
-            if 'chat_id' in body['metadata'] and body['metadata']['chat_id']:
-                conversation_id = str(body['metadata']['chat_id'])
-                logger.info(f"🆔 Using metadata.chat_id as conversation ID: {conversation_id}")
-                return conversation_id 
-        raise ValueError("No chat_id found in request body")
+        """Extract conversation ID from OpenWebUI request body using metadata.chat_id or top-level chat_id."""
+        # Check for metadata.chat_id (inlet format)
+        if "metadata" in body and isinstance(body["metadata"], dict):
+            if "chat_id" in body["metadata"] and body["metadata"]["chat_id"]:
+                conversation_id = str(body["metadata"]["chat_id"])
+                logger.info(
+                    f"🆔 Using metadata.chat_id as conversation ID: {conversation_id}"
+                )
+                return conversation_id
 
+        # Check for top-level chat_id (outlet format)
+        if "chat_id" in body and body["chat_id"]:
+            conversation_id = str(body["chat_id"])
+            logger.info(
+                f"🆔 Using top-level chat_id as conversation ID: {conversation_id}"
+            )
+            return conversation_id
+
+        raise ValueError("No chat_id found in request body")
 
     def _generate_conversation_hash(self, body: Dict[str, Any], user_id: str) -> str:
         """Generate conversation hash using user_id + conversation_id."""
@@ -916,7 +955,7 @@ class Filter:
     ) -> List[Dict[str, Any]]:
         """
         Filter out memories that have already been injected in this conversation.
-        
+
         Returns filtered memories (excluding already injected ones).
         """
         injected_memories = await self._get_conversation_memory_tracker(
@@ -924,9 +963,7 @@ class Filter:
         )
 
         if not injected_memories:
-            logger.info(
-                f"� No previous memory injections found for this conversation"
-            )
+            logger.info(f"� No previous memory injections found for this conversation")
             return memories
 
         filtered_memories = []
@@ -995,9 +1032,7 @@ class Filter:
             logger.info("� No memories found for user")
             return []
 
-        logger.info(
-            f"🔍 Found {len(user_memories)} total memories for analysis"
-        )
+        logger.info(f"🔍 Found {len(user_memories)} total memories for analysis")
 
         query_embedding = await self._generate_embedding(user_message, user_id)
 
@@ -1168,9 +1203,7 @@ class Filter:
             if body["messages"][i].get("role") == "user":
                 body["messages"].insert(i, system_message)
                 injection_position = i
-                logger.info(
-                    f"✅ Context injected successfully at position {i}"
-                )
+                logger.info(f"✅ Context injected successfully at position {i}")
                 break
 
         if injection_position is None:
@@ -1276,27 +1309,28 @@ class Filter:
         emitter: Optional[Callable[[Any], Awaitable[None]]] = None,
     ) -> List[Dict[str, Any]]:
         """Step 2 of Consolidation Pipeline: Use LLM to generate consolidation plan."""
-        if not candidate_memories:
-            return []
 
-        memory_context = "## CANDIDATE MEMORIES FOR CONSOLIDATION\n"
-        for memory in candidate_memories:
-            memory_context += f"ID: {memory['id']}\nContent: {memory['content']}\n"
-            if memory.get("created_at"):
-                memory_context += f"Created: {memory['created_at']}\n"
-            if memory.get("updated_at"):
-                memory_context += f"Updated: {memory['updated_at']}\n"
-            memory_context += "\n"
-
-        context_section = f"## USER MESSAGE\n{user_message}\n\n"
+        if candidate_memories:
+            memory_context = "## CANDIDATE MEMORIES FOR CONSOLIDATION\n"
+            for memory in candidate_memories:
+                memory_context += f"ID: {memory['id']}\nContent: {memory['content']}\n"
+                if memory.get("created_at"):
+                    memory_context += f"Created: {memory['created_at']}\n"
+                if memory.get("updated_at"):
+                    memory_context += f"Updated: {memory['updated_at']}\n"
+                memory_context += "\n"
+        else:
+            memory_context = "## CANDIDATE MEMORIES FOR CONSOLIDATION\nNone - Focus on extracting new memories from the user message below.\n\n"
 
         date_context = (
             f"## CURRENT DATE/TIME\n{self.get_formatted_datetime_string()}\n\n"
         )
 
+        user_message_section = f"## USER MESSAGE\n{user_message}\n\n"
+
         system_prompt = (
             MEMORY_CONSOLIDATION_PROMPT
-            + f"\n\n{date_context}{context_section}{memory_context}"
+            + f"\n\n{date_context}{memory_context}{user_message_section}"
         )
 
         await self._emit_status(
@@ -1443,7 +1477,9 @@ class Filter:
             await self._invalidate_user_cache(user_id, "consolidation")
         elif failed_count > 0:
             await self._emit_status(
-                emitter, f"⚠️ {failed_count} of {len(operations)} operations failed", True
+                emitter,
+                f"⚠️ {failed_count} of {len(operations)} operations failed",
+                True,
             )
         else:
             await self._emit_status(
@@ -1467,21 +1503,35 @@ class Filter:
             )
 
             if not candidates:
-                logger.info("🔧 No consolidation candidates found")
-                await self._emit_status(emitter, "💭 No memories need consolidation", True)
-                return
+                logger.info(
+                    "🔧 No existing memories found, analyzing for new memory extraction"
+                )
+                await self._emit_status(
+                    emitter, "💭 Analyzing conversation for new memories", False
+                )
+            else:
+                logger.info(f"🔧 Found {len(candidates)} consolidation candidates")
 
+            # Always call LLM consolidation - it can handle both scenarios:
+            # 1. Consolidating existing memories (when candidates exist)
+            # 2. Extracting new memories from conversation (when no candidates exist)
             operations = await self._llm_consolidate_memories(
                 user_message, candidates, emitter
             )
 
             if not operations:
-                logger.info(
-                    "🔧 Memories already optimally organized, no changes needed"
-                )
-                await self._emit_status(
-                    emitter, "✅ Memories already well organized", True
-                )
+                if candidates:
+                    logger.info(
+                        "🔧 Existing memories already optimally organized, no changes needed"
+                    )
+                    await self._emit_status(
+                        emitter, "✅ Memories already well organized", True
+                    )
+                else:
+                    logger.info("🔧 No new memories extracted from conversation")
+                    await self._emit_status(
+                        emitter, "💭 No new memories to create", True
+                    )
                 return
 
             await self._execute_consolidation_operations(
@@ -1534,35 +1584,43 @@ class Filter:
                 logger.info(
                     f"🔍 Skip analysis {skip_reason if should_skip else 'proceeding with memory retrieval'}"
                 )
-                
+
                 conversation_hash = self._generate_conversation_hash(body, user_id)
                 memories = None
                 status_message = ""
-                
+
                 if should_skip:
                     status_message = f"⏭️ {skip_reason}"
                 else:
-                    await self._emit_status(__event_emitter__, "🚀 Searching for relevant memories", False)
-                    
+                    await self._emit_status(
+                        __event_emitter__, "🚀 Searching for relevant memories", False
+                    )
+
                     candidate_memories = await self._broad_retrieval(
                         last_user_msg, user_id, __event_emitter__
                     )
                     logger.info(
                         f"� Found {len(candidate_memories) if candidate_memories else 0} candidate memories"
                     )
-                    
+
                     if candidate_memories:
-                        filtered_memories = await self._filter_already_injected_memories(
-                            user_id, conversation_hash, candidate_memories
+                        filtered_memories = (
+                            await self._filter_already_injected_memories(
+                                user_id, conversation_hash, candidate_memories
+                            )
                         )
-                        logger.info(f"✅ {len(filtered_memories)} new memories after filtering duplicates")
-                        
+                        logger.info(
+                            f"✅ {len(filtered_memories)} new memories after filtering duplicates"
+                        )
+
                         if filtered_memories:
                             memories = await self._llm_rerank_memories(
                                 last_user_msg, filtered_memories, __event_emitter__
                             )
-                            logger.info(f"� Final selection completed {len(memories) if memories else 0} memories chosen")
-                            
+                            logger.info(
+                                f"� Final selection completed {len(memories) if memories else 0} memories chosen"
+                            )
+
                             if memories:
                                 n = len(memories)
                                 if n == 1:
@@ -1576,12 +1634,14 @@ class Filter:
                         else:
                             memories = []
                             if len(candidate_memories) == 1:
-                                status_message = "🔄 1 memory already used in this conversation"
+                                status_message = (
+                                    "🔄 1 memory already used in this conversation"
+                                )
                             else:
                                 status_message = f"🔄 All {len(candidate_memories)} memories already used in this conversation"
                     else:
                         status_message = "💭 No relevant memories found"
-                
+
                 await self._emit_status(__event_emitter__, status_message, True)
                 await self._inject_context(body, memories, user_id, conversation_hash)
         else:
@@ -1633,9 +1693,7 @@ class Filter:
 
                 conversation_hash = self._generate_conversation_hash(body, user_id)
 
-                logger.info(
-                    "🔧 Starting background memory optimization task"
-                )
+                logger.info("🔧 Starting background memory optimization task")
                 task = asyncio.create_task(
                     self._consolidation_pipeline_task(
                         user_message, user_id, conversation_hash, __event_emitter__
@@ -1849,7 +1907,9 @@ class Filter:
         if result is not None:
             return result
 
-        code_fence_match = re.search(r"```json\s*(.*?)\s*```", text, re.DOTALL | re.IGNORECASE)
+        code_fence_match = re.search(
+            r"```json\s*(.*?)\s*```", text, re.DOTALL | re.IGNORECASE
+        )
         if code_fence_match:
             result = try_parse_json(code_fence_match.group(1).strip())
             if result is not None:
@@ -1870,7 +1930,7 @@ class Filter:
                 elif text[i] == "]":
                     count -= 1
                     if count == 0:
-                        result = try_parse_json(text[start:i + 1])
+                        result = try_parse_json(text[start : i + 1])
                         if result is not None:
                             return result
                         break

@@ -278,12 +278,12 @@ def test_prompt_content():
         "materially improve",
         "Relevance is Paramount",
         "Factuality First",
-        "Density is Value",
+        "Thematic Separation",
         "Temporal Currency",
         "Direct Relevance",
         "Contextual Enhancement",
         "Temporal Precedence",
-        "Informational Density",
+        "Thematic Focus",
         "Specificity Over Generality"
     ]
     
