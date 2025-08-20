@@ -70,28 +70,20 @@ class SkipThresholds:
 
     # JSON and structured data detection
     JSON_KEY_VALUE_THRESHOLD = 5  # Min key:value pairs to consider JSON/structured
-    STRUCTURED_LINE_COUNT_MIN = (
-        3  # Min number of lines before structured heuristics apply
-    )
-    STRUCTURED_PERCENTAGE_THRESHOLD = (
-        0.6  # Fraction of lines matching pattern to trigger structured skip
-    )
+    STRUCTURED_LINE_COUNT_MIN = 3  # Min number of lines before structured heuristics apply
+    STRUCTURED_PERCENTAGE_THRESHOLD = 0.6  # Fraction of lines matching pattern to trigger structured skip
     STRUCTURED_BULLET_MIN = 4  # Min bullet-like lines to treat as structured list
     STRUCTURED_PIPE_MIN = 2  # Min pipe-count per line to treat as table-like structure
 
     # Symbol and character ratio detection
     SYMBOL_CHECK_MIN_LENGTH = 10  # Min message length before symbol-ratio check runs
-    SYMBOL_RATIO_THRESHOLD = (
-        0.5  # Minimum fraction of alpha/space characters to avoid symbol-skip
-    )
+    SYMBOL_RATIO_THRESHOLD = 0.5  # Minimum fraction of alpha/space characters to avoid symbol-skip
 
     # URL and log detection
     URL_COUNT_THRESHOLD = 3  # Number of URLs considered a URL dump
     LOGS_LINE_COUNT_MIN = 2  # Min lines before log-detection heuristics apply
     LOGS_MIN_MATCHES = 1  # Minimum matched log-like lines to trigger log skip
-    LOGS_MATCH_PERCENTAGE = (
-        0.30  # Fraction of lines matching log pattern to trigger skip
-    )
+    LOGS_MATCH_PERCENTAGE = 0.30  # Fraction of lines matching log pattern to trigger skip
 
 
 class Config:
@@ -113,22 +105,17 @@ class Config:
 
     # Conversation-based memory tracking
     MAX_CONVERSATION_CACHES = 200  # Max conversation caches per user
-    CONVERSATION_CACHE_CLEANUP_THRESHOLD = (
-        250  # Trigger cleanup when cache exceeds this
-    )
+    CONVERSATION_CACHE_CLEANUP_THRESHOLD = 250  # Trigger cleanup when cache exceeds this
 
     # Embedding batch sizing
     MIN_BATCH_SIZE = 8  # Minimum embedding batch size
     MAX_BATCH_SIZE = 32  # Maximum embedding batch size
 
     # Pipeline configuration
-    RETRIEVAL_MULTIPLIER = 3.0  # Multiplier for candidate memory retrieval
+    RETRIEVAL_MULTIPLIER = 2.0  # Multiplier for candidate memory retrieval (used for both retrieval and consolidation)
     RETRIEVAL_TIMEOUT = 5.0  # Timeout for retrieval operations
-    CONSOLIDATION_CANDIDATE_SIZE = 50  # Max memories for consolidation analysis
     CONSOLIDATION_TIMEOUT = 30.0  # Timeout for consolidation operations
-    CONSOLIDATION_RELAXED_MULTIPLIER = (
-        0.9  # Relaxed threshold multiplier for consolidation
-    )
+    CONSOLIDATION_RELAXED_MULTIPLIER = 0.8  # Relaxed threshold multiplier for consolidation
 
     # Status messages for skip operations
     STATUS_MESSAGES = {
@@ -359,9 +346,7 @@ class LRUCache:
         """Get cache statistics."""
         async with self._lock:
             total_requests = self._hits + self._misses
-            hit_rate = (
-                (self._hits / total_requests * 100) if total_requests > 0 else 0.0
-            )
+            hit_rate = (self._hits / total_requests * 100) if total_requests > 0 else 0.0
             return {
                 "size": len(self._cache),
                 "hits": self._hits,
@@ -434,14 +419,10 @@ class Filter:
             raise ValidationError("Model not specified")
 
         if not 0.0 <= self.valves.semantic_threshold <= 1.0:
-            raise ValidationError(
-                f"Invalid semantic threshold: {self.valves.semantic_threshold}"
-            )
+            raise ValidationError(f"Invalid semantic threshold: {self.valves.semantic_threshold}")
 
         if self.valves.max_memories_returned <= 0:
-            raise ValidationError(
-                f"Invalid max memories returned: {self.valves.max_memories_returned}"
-            )
+            raise ValidationError(f"Invalid max memories returned: {self.valves.max_memories_returned}")
 
         logger.info("✅ Configuration validated")
 
@@ -454,9 +435,7 @@ class Filter:
             async with Filter._model_load_lock:
                 if Filter._model is None:
                     try:
-                        logger.info(
-                            f"🤖 Loading embedding model: {self.valves.embedding_model}"
-                        )
+                        logger.info(f"🤖 Loading embedding model: {self.valves.embedding_model}")
 
                         def load_model():
                             return SentenceTransformer(
@@ -532,9 +511,7 @@ class Filter:
             logger.error(f"❌ {error_msg}")
             raise EmbeddingError(error_msg)
 
-    async def _generate_embeddings_batch(
-        self, texts: List[str], user_id: str
-    ) -> List[np.ndarray]:
+    async def _generate_embeddings_batch(self, texts: List[str], user_id: str) -> List[np.ndarray]:
         """Generate embeddings for multiple texts efficiently with batch processing and caching."""
         if not texts:
             return []
@@ -569,9 +546,7 @@ class Filter:
                 )
 
                 def generate_batch_embeddings(batch_texts):
-                    embeddings = model.encode(
-                        batch_texts, convert_to_numpy=True, show_progress_bar=False
-                    )
+                    embeddings = model.encode(batch_texts, convert_to_numpy=True, show_progress_bar=False)
                     normalized_embeddings = []
                     for embedding in embeddings:
                         norm = np.linalg.norm(embedding)
@@ -586,9 +561,7 @@ class Filter:
                     batch_texts = uncached_texts[i : i + batch_size]
                     batch_indices = uncached_indices[i : i + batch_size]
 
-                    batch_embeddings = await loop.run_in_executor(
-                        None, generate_batch_embeddings, batch_texts
-                    )
+                    batch_embeddings = await loop.run_in_executor(None, generate_batch_embeddings, batch_texts)
 
                     for j, embedding in enumerate(batch_embeddings):
                         text_idx = batch_indices[j]
@@ -613,9 +586,7 @@ class Filter:
                 result_embeddings.append(None)
 
         valid_count = len([emb for emb in result_embeddings if emb is not None])
-        logger.info(
-            f"🚀 Batch embedding: {len(cached_embeddings)} cached, {len(new_embeddings)} new, {valid_count}/{len(texts)} valid"
-        )
+        logger.info(f"🚀 Batch embedding: {len(cached_embeddings)} cached, {len(new_embeddings)} new, {valid_count}/{len(texts)} valid")
         return result_embeddings
 
     async def _get_aiohttp_session(self) -> aiohttp.ClientSession:
@@ -626,9 +597,7 @@ class Filter:
 
             async with Filter._session_lock:
                 if Filter._aiohttp_session is None or Filter._aiohttp_session.closed:
-                    timeout = aiohttp.ClientTimeout(
-                        total=Config.TIMEOUT_SESSION_REQUEST
-                    )
+                    timeout = aiohttp.ClientTimeout(total=Config.TIMEOUT_SESSION_REQUEST)
                     connector = aiohttp.TCPConnector(
                         limit=100,
                         limit_per_host=30,
@@ -711,10 +680,7 @@ class Filter:
             r"^\s*\{\s*\}\s*$",
             r"<[^>]+>[\s\S]*</[^>]+>",
         ]
-        return any(
-            re.search(pattern, message, re.MULTILINE | re.IGNORECASE)
-            for pattern in code_patterns
-        )
+        return any(re.search(pattern, message, re.MULTILINE | re.IGNORECASE) for pattern in code_patterns)
 
     def _is_structured_data(self, message: str) -> bool:
         """Check if message contains structured data patterns."""
@@ -726,17 +692,11 @@ class Filter:
             r"\[\s*\{.*\}\s*\]",
         ]
 
-        if any(
-            re.search(pattern, message, re.DOTALL | re.IGNORECASE)
-            for pattern in json_indicators
-        ):
+        if any(re.search(pattern, message, re.DOTALL | re.IGNORECASE) for pattern in json_indicators):
             return True
 
         json_kv_pattern = r'["\']?\w+["\']?\s*:\s*["\{\[\d\w]'
-        if (
-            len(re.findall(json_kv_pattern, message))
-            >= SkipThresholds.JSON_KEY_VALUE_THRESHOLD
-        ):
+        if len(re.findall(json_kv_pattern, message)) >= SkipThresholds.JSON_KEY_VALUE_THRESHOLD:
             return True
 
         message_lines = message.split("\n")
@@ -745,9 +705,7 @@ class Filter:
         if line_count < SkipThresholds.STRUCTURED_LINE_COUNT_MIN:
             return False
 
-        count_lines = lambda pattern: sum(
-            1 for line in message_lines if re.match(pattern, line)
-        )
+        count_lines = lambda pattern: sum(1 for line in message_lines if re.match(pattern, line))
         threshold = max(
             SkipThresholds.STRUCTURED_LINE_COUNT_MIN,
             line_count * SkipThresholds.STRUCTURED_PERCENTAGE_THRESHOLD,
@@ -755,16 +713,10 @@ class Filter:
 
         structured_checks = [
             count_lines(r"^\s*[A-Za-z0-9_]+:\s+\S+") >= threshold,
-            count_lines(r"^\s*[-\*\+]\s+.+")
-            >= max(SkipThresholds.STRUCTURED_BULLET_MIN, threshold),
+            count_lines(r"^\s*[-\*\+]\s+.+") >= max(SkipThresholds.STRUCTURED_BULLET_MIN, threshold),
             count_lines(r"^\s*\d+\.\s") >= threshold,
             count_lines(r"^\s*[a-zA-Z]\)\s") >= threshold,
-            sum(
-                1
-                for line in message_lines
-                if "|" in line and line.count("|") >= SkipThresholds.STRUCTURED_PIPE_MIN
-            )
-            >= max(SkipThresholds.STRUCTURED_PIPE_MIN, threshold),
+            sum(1 for line in message_lines if "|" in line and line.count("|") >= SkipThresholds.STRUCTURED_PIPE_MIN) >= max(SkipThresholds.STRUCTURED_PIPE_MIN, threshold),
         ]
 
         return any(structured_checks)
@@ -791,20 +743,13 @@ class Filter:
             r"Exception\s+in\s+thread",
         ]
 
-        if any(
-            re.search(pattern, message, re.IGNORECASE)
-            for pattern in single_line_error_patterns
-        ):
+        if any(re.search(pattern, message, re.IGNORECASE) for pattern in single_line_error_patterns):
             return True
 
         if line_count < SkipThresholds.LOGS_LINE_COUNT_MIN:
             return False
 
-        datetime_matches = sum(
-            1
-            for line in message_lines
-            if re.search(r"\d{2,4}[-/]\d{1,2}[-/]\d{1,2}.*\d{1,2}:\d{2}", line)
-        )
+        datetime_matches = sum(1 for line in message_lines if re.search(r"\d{2,4}[-/]\d{1,2}[-/]\d{1,2}.*\d{1,2}:\d{2}", line))
         if datetime_matches >= max(
             SkipThresholds.LOGS_MIN_MATCHES,
             line_count * SkipThresholds.LOGS_MATCH_PERCENTAGE,
@@ -826,19 +771,14 @@ class Filter:
             r"^\s*(NameError|TypeError|ValueError|AttributeError|KeyError):",
         ]
 
-        return any(
-            any(re.search(pattern, line) for pattern in stack_patterns)
-            for line in message_lines
-        )
+        return any(any(re.search(pattern, line) for pattern in stack_patterns) for line in message_lines)
 
     def _is_url_dump(self, message: str) -> bool:
         """Check if message contains multiple URLs (URL dump)."""
         url_count = len(re.findall(r"https?://[^\s]+", message))
         return url_count >= SkipThresholds.URL_COUNT_THRESHOLD
 
-    def _extract_text_from_message_content(
-        self, content: Union[str, List[Dict], Dict]
-    ) -> str:
+    def _extract_text_from_message_content(self, content: Union[str, List[Dict], Dict]) -> str:
         """Extract text from various message content formats."""
         if isinstance(content, str):
             return content
@@ -870,17 +810,13 @@ class Filter:
         if "metadata" in body and isinstance(body["metadata"], dict):
             if "chat_id" in body["metadata"] and body["metadata"]["chat_id"]:
                 conversation_id = str(body["metadata"]["chat_id"])
-                logger.info(
-                    f"🆔 Using metadata.chat_id as conversation ID: {conversation_id}"
-                )
+                logger.info(f"🆔 Using metadata.chat_id as conversation ID: {conversation_id}")
                 return conversation_id
 
         # Check for top-level chat_id (outlet format)
         if "chat_id" in body and body["chat_id"]:
             conversation_id = str(body["chat_id"])
-            logger.info(
-                f"🆔 Using top-level chat_id as conversation ID: {conversation_id}"
-            )
+            logger.info(f"🆔 Using top-level chat_id as conversation ID: {conversation_id}")
             return conversation_id
 
         raise ValueError("No chat_id found in request body")
@@ -892,9 +828,7 @@ class Filter:
         conv_hash = hashlib.sha256(conversation_key.encode()).hexdigest()[:16]
         return conv_hash
 
-    async def _get_conversation_memory_tracker(
-        self, user_id: str, conversation_hash: str
-    ) -> set:
+    async def _get_conversation_memory_tracker(self, user_id: str, conversation_hash: str) -> set:
         if Filter._conversation_cache_lock is None:
             Filter._conversation_cache_lock = asyncio.Lock()
 
@@ -905,9 +839,7 @@ class Filter:
             user_cache = Filter._conversation_memory_cache[user_id]
 
             if len(user_cache) > Config.CONVERSATION_CACHE_CLEANUP_THRESHOLD:
-                conversations_to_keep = list(user_cache.keys())[
-                    -Config.MAX_CONVERSATION_CACHES :
-                ]
+                conversations_to_keep = list(user_cache.keys())[-Config.MAX_CONVERSATION_CACHES :]
                 user_cache = {k: user_cache[k] for k in conversations_to_keep}
                 Filter._conversation_memory_cache[user_id] = user_cache
 
@@ -916,52 +848,30 @@ class Filter:
 
             return user_cache[conversation_hash]
 
-    async def _mark_memories_as_injected(
-        self, user_id: str, conversation_hash: str, memory_ids: List[str]
-    ) -> None:
-        injected_memories = await self._get_conversation_memory_tracker(
-            user_id, conversation_hash
-        )
+    async def _mark_memories_as_injected(self, user_id: str, conversation_hash: str, memory_ids: List[str]) -> None:
+        injected_memories = await self._get_conversation_memory_tracker(user_id, conversation_hash)
         injected_memories.update(memory_ids)
-        logger.info(
-            f"📝 Marked {len(memory_ids)} memories as injected for conversation {conversation_hash}: {memory_ids}"
-        )
+        logger.info(f"📝 Marked {len(memory_ids)} memories as injected for conversation {conversation_hash}: {memory_ids}")
 
-    async def _mark_memory_as_created(
-        self, user_id: str, conversation_hash: str, memory_id: str
-    ) -> None:
-        injected_memories = await self._get_conversation_memory_tracker(
-            user_id, conversation_hash
-        )
+    async def _mark_memory_as_created(self, user_id: str, conversation_hash: str, memory_id: str) -> None:
+        injected_memories = await self._get_conversation_memory_tracker(user_id, conversation_hash)
         injected_memories.add(memory_id)
 
-    async def _mark_memory_as_updated(
-        self, user_id: str, conversation_hash: str, memory_id: str
-    ) -> None:
-        injected_memories = await self._get_conversation_memory_tracker(
-            user_id, conversation_hash
-        )
+    async def _mark_memory_as_updated(self, user_id: str, conversation_hash: str, memory_id: str) -> None:
+        injected_memories = await self._get_conversation_memory_tracker(user_id, conversation_hash)
         injected_memories.add(memory_id)
 
-    async def _remove_memory_from_conversation_tracking(
-        self, user_id: str, conversation_hash: str, memory_id: str
-    ) -> None:
-        injected_memories = await self._get_conversation_memory_tracker(
-            user_id, conversation_hash
-        )
+    async def _remove_memory_from_conversation_tracking(self, user_id: str, conversation_hash: str, memory_id: str) -> None:
+        injected_memories = await self._get_conversation_memory_tracker(user_id, conversation_hash)
         injected_memories.discard(memory_id)
 
-    async def _filter_already_injected_memories(
-        self, user_id: str, conversation_hash: str, memories: List[Dict[str, Any]]
-    ) -> List[Dict[str, Any]]:
+    async def _filter_already_injected_memories(self, user_id: str, conversation_hash: str, memories: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """
         Filter out memories that have already been injected in this conversation.
 
         Returns filtered memories (excluding already injected ones).
         """
-        injected_memories = await self._get_conversation_memory_tracker(
-            user_id, conversation_hash
-        )
+        injected_memories = await self._get_conversation_memory_tracker(user_id, conversation_hash)
 
         if not injected_memories:
             logger.info(f"� No previous memory injections found for this conversation")
@@ -984,9 +894,7 @@ class Filter:
             else:
                 logger.info(f"🔄 Filtered out {n} previously injected memories")
 
-        logger.info(
-            f"✅ {len(filtered_memories)} new memories available from {len(memories)} candidates"
-        )
+        logger.info(f"✅ {len(filtered_memories)} new memories available from {len(memories)} candidates")
         return filtered_memories
 
     async def _emit_status(
@@ -1020,9 +928,7 @@ class Filter:
         emitter: Optional[Callable[[Any], Awaitable[None]]] = None,
     ) -> List[Dict[str, Any]]:
         """Step 1 of Retrieval Pipeline: Perform broad vector search for candidate memories."""
-        candidate_limit = int(
-            self.valves.max_memories_returned * Config.RETRIEVAL_MULTIPLIER
-        )
+        candidate_limit = int(self.valves.max_memories_returned * Config.RETRIEVAL_MULTIPLIER)
 
         user_memories = await asyncio.wait_for(
             asyncio.to_thread(Memories.get_memories_by_user_id, user_id),
@@ -1039,9 +945,7 @@ class Filter:
 
         memory_contents = [memory.content for memory in user_memories]
 
-        memory_embeddings = await self._generate_embeddings_batch(
-            memory_contents, user_id
-        )
+        memory_embeddings = await self._generate_embeddings_batch(memory_contents, user_id)
 
         if len(memory_embeddings) != len(user_memories):
             error_msg = f"Embedding count mismatch: {len(memory_embeddings)} vs {len(user_memories)}"
@@ -1068,23 +972,16 @@ class Filter:
         formatted_memories.sort(key=lambda x: x["relevance"], reverse=True)
         formatted_memories = formatted_memories[:candidate_limit]
 
-        logger.info(
-            f"🎯 Selected {len(formatted_memories)} candidate memories (threshold {self.valves.semantic_threshold:.2f})"
-        )
+        logger.info(f"🎯 Selected {len(formatted_memories)} candidate memories (threshold {self.valves.semantic_threshold:.2f})")
 
-        if (
-            len(formatted_memories) >= candidate_limit
-            and len(user_memories) > candidate_limit
-        ):
+        if len(formatted_memories) >= candidate_limit and len(user_memories) > candidate_limit:
             await self._emit_status(
                 emitter,
                 f"� Found {len(formatted_memories)} relevant memories from {len(user_memories)} total",
                 False,
             )
         else:
-            await self._emit_status(
-                emitter, f"� Found {len(formatted_memories)} relevant memories", False
-            )
+            await self._emit_status(emitter, f"� Found {len(formatted_memories)} relevant memories", False)
 
         return formatted_memories
 
@@ -1130,23 +1027,16 @@ class Filter:
 
         final_memories = ranked_memories[: self.valves.max_memories_returned]
 
-        logger.info(
-            f"🎯 Selected {len(final_memories)} memories from {len(candidate_memories)} candidates after analysis"
-        )
+        logger.info(f"🎯 Selected {len(final_memories)} memories from {len(candidate_memories)} candidates after analysis")
 
-        if (
-            len(final_memories) >= self.valves.max_memories_returned
-            and len(ranked_memories) > self.valves.max_memories_returned
-        ):
+        if len(final_memories) >= self.valves.max_memories_returned and len(ranked_memories) > self.valves.max_memories_returned:
             await self._emit_status(
                 emitter,
                 f"🎯 Selected {len(final_memories)} most relevant memories",
                 False,
             )
         else:
-            await self._emit_status(
-                emitter, f"🎯 Selected {len(final_memories)} relevant memories", False
-            )
+            await self._emit_status(emitter, f"🎯 Selected {len(final_memories)} relevant memories", False)
 
         return final_memories
 
@@ -1161,9 +1051,7 @@ class Filter:
             logger.info("❌ Invalid body or no messages found")
             return
 
-        logger.info(
-            f"� Preparing to inject {len(memories) if memories else 0} memories for user {user_id}"
-        )
+        logger.info(f"� Preparing to inject {len(memories) if memories else 0} memories for user {user_id}")
 
         current_datetime = self.get_formatted_datetime_string()
         content_parts = [f"Current Date/Time: {current_datetime}"]
@@ -1172,12 +1060,8 @@ class Filter:
             if not conversation_hash:
                 conversation_hash = self._generate_conversation_hash(body, user_id)
             memory_ids = [str(memory.get("id", "")) for memory in memories]
-            await self._mark_memories_as_injected(
-                user_id, conversation_hash, memory_ids
-            )
-            logger.info(
-                f"✅ Marked {len(memory_ids)} memories as injected for this conversation"
-            )
+            await self._mark_memories_as_injected(user_id, conversation_hash, memory_ids)
+            logger.info(f"✅ Marked {len(memory_ids)} memories as injected for this conversation")
 
             n = len(memories)
             if n == 1:
@@ -1185,9 +1069,7 @@ class Filter:
             else:
                 memory_header = f"BACKGROUND: You naturally know these {n} facts. Never mention their source."
 
-            memory_content = "\n".join(
-                [f"- {memory['content']}" for memory in memories]
-            )
+            memory_content = "\n".join([f"- {memory['content']}" for memory in memories])
             content_parts.append(f"{memory_header}\n{memory_content}")
             logger.info(f"💭 Added {len(memories)} memories to context injection")
 
@@ -1222,17 +1104,13 @@ class Filter:
             await self._emit_status(emitter, "💭 No memories to analyze", True)
             return []
 
-        logger.info(
-            f"�️ Found {len(user_memories)} existing memories for consolidation analysis"
-        )
+        logger.info(f"�️ Found {len(user_memories)} existing memories for consolidation analysis")
 
         query_embedding = await self._generate_embedding(user_message, user_id)
 
         memory_contents = [memory.content for memory in user_memories]
 
-        memory_embeddings = await self._generate_embeddings_batch(
-            memory_contents, user_id
-        )
+        memory_embeddings = await self._generate_embeddings_batch(memory_contents, user_id)
 
         if len(memory_embeddings) != len(user_memories):
             error_msg = f"Consolidation embedding count mismatch: {len(memory_embeddings)} vs {len(user_memories)}"
@@ -1240,9 +1118,7 @@ class Filter:
             raise EmbeddingError(error_msg)
 
         formatted_memories = []
-        relaxed_threshold = (
-            self.valves.semantic_threshold * Config.CONSOLIDATION_RELAXED_MULTIPLIER
-        )
+        relaxed_threshold = self.valves.semantic_threshold * Config.CONSOLIDATION_RELAXED_MULTIPLIER
 
         for i, memory in enumerate(user_memories):
             memory_embedding = memory_embeddings[i]
@@ -1254,15 +1130,11 @@ class Filter:
             if similarity >= relaxed_threshold:
                 created_at_iso = None
                 if hasattr(memory, "created_at") and memory.created_at:
-                    created_at_iso = datetime.fromtimestamp(
-                        memory.created_at, tz=timezone.utc
-                    ).isoformat()
+                    created_at_iso = datetime.fromtimestamp(memory.created_at, tz=timezone.utc).isoformat()
 
                 updated_at_iso = None
                 if hasattr(memory, "updated_at") and memory.updated_at:
-                    updated_at_iso = datetime.fromtimestamp(
-                        memory.updated_at, tz=timezone.utc
-                    ).isoformat()
+                    updated_at_iso = datetime.fromtimestamp(memory.updated_at, tz=timezone.utc).isoformat()
 
                 memory_dict = {
                     "id": str(memory.id),
@@ -1273,17 +1145,13 @@ class Filter:
                 }
                 formatted_memories.append(memory_dict)
 
+        candidate_limit = int(self.valves.max_memories_returned * Config.RETRIEVAL_MULTIPLIER)
         formatted_memories.sort(key=lambda x: x["relevance"], reverse=True)
-        formatted_memories = formatted_memories[: Config.CONSOLIDATION_CANDIDATE_SIZE]
+        formatted_memories = formatted_memories[:candidate_limit]
 
-        logger.info(
-            f"� Found {len(formatted_memories)} candidate memories for consolidation analysis"
-        )
+        logger.info(f"� Found {len(formatted_memories)} candidate memories for consolidation analysis")
 
-        if (
-            len(formatted_memories) >= Config.CONSOLIDATION_CANDIDATE_SIZE
-            and len(user_memories) > Config.CONSOLIDATION_CANDIDATE_SIZE
-        ):
+        if len(formatted_memories) >= candidate_limit and len(user_memories) > candidate_limit:
             await self._emit_status(
                 emitter,
                 f"� Analyzing {len(formatted_memories)} candidate memories from {len(user_memories)} total",
@@ -1318,20 +1186,13 @@ class Filter:
         else:
             memory_context = "## CANDIDATE MEMORIES FOR CONSOLIDATION\nNone - Focus on extracting new memories from the user message below.\n\n"
 
-        date_context = (
-            f"## CURRENT DATE/TIME\n{self.get_formatted_datetime_string()}\n\n"
-        )
+        date_context = f"## CURRENT DATE/TIME\n{self.get_formatted_datetime_string()}\n\n"
 
         user_message_section = f"## USER MESSAGE\n{user_message}\n\n"
 
-        system_prompt = (
-            MEMORY_CONSOLIDATION_PROMPT
-            + f"\n\n{date_context}{memory_context}{user_message_section}"
-        )
+        system_prompt = MEMORY_CONSOLIDATION_PROMPT + f"\n\n{date_context}{memory_context}{user_message_section}"
 
-        await self._emit_status(
-            emitter, "� Analyzing memory patterns for optimization", False
-        )
+        await self._emit_status(emitter, "� Analyzing memory patterns for optimization", False)
         response = await asyncio.wait_for(
             self._query_llm(
                 system_prompt,
@@ -1346,9 +1207,7 @@ class Filter:
             logger.error(f"❌ {error_msg}")
             raise NeuralRecallError(error_msg)
 
-        logger.info(
-            f"🔧 Memory consolidation analysis completed ({len(response)} characters)"
-        )
+        logger.info(f"🔧 Memory consolidation analysis completed ({len(response)} characters)")
 
         operations = self._extract_and_parse_json(response)
         if not isinstance(operations, list):
@@ -1364,22 +1223,12 @@ class Filter:
         valid_operations = []
 
         total_operations = len(operations)
-        delete_operations = [
-            op
-            for op in operations
-            if isinstance(op, dict) and op.get("operation") == "DELETE"
-        ]
-        delete_ratio = (
-            len(delete_operations) / total_operations if total_operations > 0 else 0
-        )
+        delete_operations = [op for op in operations if isinstance(op, dict) and op.get("operation") == "DELETE"]
+        delete_ratio = len(delete_operations) / total_operations if total_operations > 0 else 0
 
         if delete_ratio > 0.5 and total_operations >= 3:
-            logger.warning(
-                f"⚠️ Consolidation safety trigger: {len(delete_operations)}/{total_operations} operations are deletions ({delete_ratio*100:.1f}%)"
-            )
-            logger.warning(
-                "⚠️ Rejecting consolidation plan to prevent excessive memory loss"
-            )
+            logger.warning(f"⚠️ Consolidation safety trigger: {len(delete_operations)}/{total_operations} operations are deletions ({delete_ratio*100:.1f}%)")
+            logger.warning("⚠️ Rejecting consolidation plan to prevent excessive memory loss")
             await self._emit_status(
                 emitter,
                 "⚠️ Memory consolidation plan too aggressive, preserving existing memories",
@@ -1393,12 +1242,8 @@ class Filter:
                 if memory_operation.validate_operation(existing_memory_ids):
                     valid_operations.append(operation)
 
-        logger.info(
-            f"🎯 Planned {len(valid_operations)} memory optimization operations"
-        )
-        await self._emit_status(
-            emitter, f"🎯 Planning {len(valid_operations)} memory optimizations", False
-        )
+        logger.info(f"🎯 Planned {len(valid_operations)} memory optimization operations")
+        await self._emit_status(emitter, f"🎯 Planning {len(valid_operations)} memory optimizations", False)
         return valid_operations
 
     async def _execute_consolidation_operations(
@@ -1430,9 +1275,7 @@ class Filter:
         for i, operation_data in enumerate(operations):
             try:
                 operation = MemoryOperation(**operation_data)
-                result = await self._execute_single_operation(
-                    operation, user, user_id, conversation_hash
-                )
+                result = await self._execute_single_operation(operation, user, user_id, conversation_hash)
                 if result == "CREATE":
                     created_count += 1
                 elif result == "UPDATE":
@@ -1443,9 +1286,7 @@ class Filter:
                 failed_count += 1
                 operation_type = operation_data.get("operation", "UNKNOWN")
                 operation_id = operation_data.get("id", "no-id")
-                logger.error(
-                    f"❌ Failed to execute {operation_type} operation {i+1}/{len(operations)} (ID: {operation_id}): {str(e)}"
-                )
+                logger.error(f"❌ Failed to execute {operation_type} operation {i+1}/{len(operations)} (ID: {operation_id}): {str(e)}")
                 continue
 
         total_executed = created_count + updated_count + deleted_count
@@ -1478,9 +1319,7 @@ class Filter:
                 True,
             )
         else:
-            await self._emit_status(
-                emitter, "✅ Memories already optimally organized", True
-            )
+            await self._emit_status(emitter, "✅ Memories already optimally organized", True)
 
     async def _consolidation_pipeline_task(
         self,
@@ -1494,53 +1333,35 @@ class Filter:
             logger.info("🔧 Starting memory consolidation analysis")
             await self._emit_status(emitter, "🔧 Analyzing memory patterns", False)
 
-            candidates = await self._gather_consolidation_candidates(
-                user_message, user_id, emitter
-            )
+            candidates = await self._gather_consolidation_candidates(user_message, user_id, emitter)
 
             if not candidates:
-                logger.info(
-                    "🔧 No existing memories found, analyzing for new memory extraction"
-                )
-                await self._emit_status(
-                    emitter, "💭 Analyzing conversation for new memories", False
-                )
+                logger.info("🔧 No existing memories found, analyzing for new memory extraction")
+                await self._emit_status(emitter, "💭 Analyzing conversation for new memories", False)
             else:
                 logger.info(f"🔧 Found {len(candidates)} consolidation candidates")
 
             # Always call LLM consolidation - it can handle both scenarios:
             # 1. Consolidating existing memories (when candidates exist)
             # 2. Extracting new memories from conversation (when no candidates exist)
-            operations = await self._llm_consolidate_memories(
-                user_message, candidates, emitter
-            )
+            operations = await self._llm_consolidate_memories(user_message, candidates, emitter)
 
             if not operations:
                 if candidates:
-                    logger.info(
-                        "🔧 Existing memories already optimally organized, no changes needed"
-                    )
-                    await self._emit_status(
-                        emitter, "✅ Memories already well organized", True
-                    )
+                    logger.info("🔧 Existing memories already optimally organized, no changes needed")
+                    await self._emit_status(emitter, "✅ Memories already well organized", True)
                 else:
                     logger.info("🔧 No new memories extracted from conversation")
-                    await self._emit_status(
-                        emitter, "💭 No new memories to create", True
-                    )
+                    await self._emit_status(emitter, "💭 No new memories to create", True)
                 return
 
-            await self._execute_consolidation_operations(
-                operations, user_id, conversation_hash, emitter
-            )
+            await self._execute_consolidation_operations(operations, user_id, conversation_hash, emitter)
 
             logger.info("🔧 Memory consolidation completed successfully")
 
         except Exception as e:
             logger.error(f"❌ Memory consolidation failed {str(e)}")
-            await self._emit_status(
-                emitter, f"❌ Memory consolidation failed {str(e)[:50]}", True
-            )
+            await self._emit_status(emitter, f"❌ Memory consolidation failed {str(e)[:50]}", True)
             raise
 
     async def inlet(
@@ -1561,25 +1382,15 @@ class Filter:
             logger.info(f"� Found {len(body['messages'])} messages in request")
 
             last_user_msg = next(
-                (
-                    self._extract_text_from_message_content(m["content"])
-                    for m in reversed(body.get("messages", []))
-                    if m.get("role") == "user"
-                ),
+                (self._extract_text_from_message_content(m["content"]) for m in reversed(body.get("messages", [])) if m.get("role") == "user"),
                 None,
             )
 
-            logger.info(
-                f"👤 User message extracted {'successfully' if last_user_msg else 'not found'}"
-            )
+            logger.info(f"👤 User message extracted {'successfully' if last_user_msg else 'not found'}")
 
             if last_user_msg:
-                should_skip, skip_reason = self._should_skip_memory_operations(
-                    last_user_msg
-                )
-                logger.info(
-                    f"🔍 Skip analysis {skip_reason if should_skip else 'proceeding with memory retrieval'}"
-                )
+                should_skip, skip_reason = self._should_skip_memory_operations(last_user_msg)
+                logger.info(f"🔍 Skip analysis {skip_reason if should_skip else 'proceeding with memory retrieval'}")
 
                 conversation_hash = self._generate_conversation_hash(body, user_id)
                 memories = None
@@ -1588,34 +1399,18 @@ class Filter:
                 if should_skip:
                     status_message = f"⏭️ {skip_reason}"
                 else:
-                    await self._emit_status(
-                        __event_emitter__, "🚀 Searching for relevant memories", False
-                    )
+                    await self._emit_status(__event_emitter__, "🚀 Searching for relevant memories", False)
 
-                    candidate_memories = await self._broad_retrieval(
-                        last_user_msg, user_id, __event_emitter__
-                    )
-                    logger.info(
-                        f"� Found {len(candidate_memories) if candidate_memories else 0} candidate memories"
-                    )
+                    candidate_memories = await self._broad_retrieval(last_user_msg, user_id, __event_emitter__)
+                    logger.info(f"� Found {len(candidate_memories) if candidate_memories else 0} candidate memories")
 
                     if candidate_memories:
-                        filtered_memories = (
-                            await self._filter_already_injected_memories(
-                                user_id, conversation_hash, candidate_memories
-                            )
-                        )
-                        logger.info(
-                            f"✅ {len(filtered_memories)} new memories after filtering duplicates"
-                        )
+                        filtered_memories = await self._filter_already_injected_memories(user_id, conversation_hash, candidate_memories)
+                        logger.info(f"✅ {len(filtered_memories)} new memories after filtering duplicates")
 
                         if filtered_memories:
-                            memories = await self._llm_rerank_memories(
-                                last_user_msg, filtered_memories, __event_emitter__
-                            )
-                            logger.info(
-                                f"� Final selection completed {len(memories) if memories else 0} memories chosen"
-                            )
+                            memories = await self._llm_rerank_memories(last_user_msg, filtered_memories, __event_emitter__)
+                            logger.info(f"� Final selection completed {len(memories) if memories else 0} memories chosen")
 
                             if memories:
                                 n = len(memories)
@@ -1630,9 +1425,7 @@ class Filter:
                         else:
                             memories = []
                             if len(candidate_memories) == 1:
-                                status_message = (
-                                    "🔄 1 memory already used in this conversation"
-                                )
+                                status_message = "🔄 1 memory already used in this conversation"
                             else:
                                 status_message = f"🔄 All {len(candidate_memories)} memories already used in this conversation"
                     else:
@@ -1643,9 +1436,7 @@ class Filter:
         else:
             await self._inject_context(body, None, user_id)
 
-        logger.info(
-            f"✅ Request processing complete, injected {len(memories) if memories else 0} memories"
-        )
+        logger.info(f"✅ Request processing complete, injected {len(memories) if memories else 0} memories")
         return body
 
     async def outlet(
@@ -1667,22 +1458,14 @@ class Filter:
 
         if "messages" in body and body["messages"]:
             user_message = next(
-                (
-                    self._extract_text_from_message_content(m["content"])
-                    for m in reversed(body["messages"])
-                    if m["role"] == "user"
-                ),
+                (self._extract_text_from_message_content(m["content"]) for m in reversed(body["messages"]) if m["role"] == "user"),
                 None,
             )
 
-            logger.info(
-                f"👤 User message {'found' if user_message else 'not found'} for optimization analysis"
-            )
+            logger.info(f"👤 User message {'found' if user_message else 'not found'} for optimization analysis")
 
             if user_message:
-                should_skip, skip_reason = self._should_skip_memory_operations(
-                    user_message
-                )
+                should_skip, skip_reason = self._should_skip_memory_operations(user_message)
                 if should_skip:
                     logger.info(f"⏭️ Memory optimization skipped {skip_reason}")
                     return body
@@ -1690,18 +1473,12 @@ class Filter:
                 conversation_hash = self._generate_conversation_hash(body, user_id)
 
                 logger.info("🔧 Starting background memory optimization task")
-                task = asyncio.create_task(
-                    self._consolidation_pipeline_task(
-                        user_message, user_id, conversation_hash, __event_emitter__
-                    )
-                )
+                task = asyncio.create_task(self._consolidation_pipeline_task(user_message, user_id, conversation_hash, __event_emitter__))
 
                 def handle_task_completion(completed_task):
                     if completed_task.exception():
                         exception = completed_task.exception()
-                        logger.error(
-                            f"❌ Background memory optimization failed {exception}"
-                        )
+                        logger.error(f"❌ Background memory optimization failed {exception}")
                         if __event_emitter__:
                             try:
                                 asyncio.create_task(
@@ -1712,13 +1489,9 @@ class Filter:
                                     )
                                 )
                             except Exception as emit_error:
-                                logger.error(
-                                    f"❌ Failed to emit final error status: {emit_error}"
-                                )
+                                logger.error(f"❌ Failed to emit final error status: {emit_error}")
                     else:
-                        logger.info(
-                            "✅ Consolidation pipeline task completed successfully"
-                        )
+                        logger.info("✅ Consolidation pipeline task completed successfully")
 
                 task.add_done_callback(handle_task_completion)
 
@@ -1742,14 +1515,10 @@ class Filter:
         """Clean memory content and validate length limits."""
         clean_content = content.strip()
         if len(clean_content) > Config.MAX_MEMORY_CONTENT_LENGTH:
-            raise ValueError(
-                f"Memory content too long ({len(clean_content)} chars, max {Config.MAX_MEMORY_CONTENT_LENGTH})"
-            )
+            raise ValueError(f"Memory content too long ({len(clean_content)} chars, max {Config.MAX_MEMORY_CONTENT_LENGTH})")
         return clean_content
 
-    async def _execute_database_operation(
-        self, operation_func, *args, timeout: float = None
-    ) -> Any:
+    async def _execute_database_operation(self, operation_func, *args, timeout: float = None) -> Any:
         """Execute database operation with timeout and error handling."""
         if timeout is None:
             timeout = Config.TIMEOUT_DATABASE_OPERATION
@@ -1770,14 +1539,10 @@ class Filter:
         if operation.operation == "CREATE":
             clean_content = self._clean_memory_content(operation.content)
 
-            create_result = await self._execute_database_operation(
-                Memories.insert_new_memory, user.id, clean_content
-            )
+            create_result = await self._execute_database_operation(Memories.insert_new_memory, user.id, clean_content)
 
             if conversation_hash and user_id and create_result:
-                await self._mark_memory_as_created(
-                    user_id, conversation_hash, str(create_result.id)
-                )
+                await self._mark_memory_as_created(user_id, conversation_hash, str(create_result.id))
 
             logger.info("✨ Memory created successfully")
             return "CREATE"
@@ -1793,22 +1558,16 @@ class Filter:
             )
 
             if conversation_hash and user_id and operation.id:
-                await self._mark_memory_as_updated(
-                    user_id, conversation_hash, operation.id
-                )
+                await self._mark_memory_as_updated(user_id, conversation_hash, operation.id)
 
             logger.info(f"� Memory updated successfully")
             return "UPDATE"
 
         elif operation.operation == "DELETE" and operation.id:
-            await self._execute_database_operation(
-                Memories.delete_memory_by_id_and_user_id, operation.id, user.id
-            )
+            await self._execute_database_operation(Memories.delete_memory_by_id_and_user_id, operation.id, user.id)
 
             if conversation_hash and user_id and operation.id:
-                await self._remove_memory_from_conversation_tracking(
-                    user_id, conversation_hash, operation.id
-                )
+                await self._remove_memory_from_conversation_tracking(user_id, conversation_hash, operation.id)
 
             logger.info("🗑️ Memory deleted successfully")
             return "DELETE"
@@ -1816,9 +1575,7 @@ class Filter:
         else:
             raise MemoryOperationError(f"Unsupported operation: {operation}")
 
-    async def _query_llm(
-        self, system_prompt: str, user_prompt: str, json_response: bool = True
-    ) -> str:
+    async def _query_llm(self, system_prompt: str, user_prompt: str, json_response: bool = True) -> str:
         """Query the OpenAI API or compatible endpoints with production-ready error handling."""
         if not self.valves.api_key or not self.valves.api_key.strip():
             raise NeuralRecallError("API key is required but not provided.")
@@ -1903,9 +1660,7 @@ class Filter:
         if result is not None:
             return result
 
-        code_fence_match = re.search(
-            r"```json\s*(.*?)\s*```", text, re.DOTALL | re.IGNORECASE
-        )
+        code_fence_match = re.search(r"```json\s*(.*?)\s*```", text, re.DOTALL | re.IGNORECASE)
         if code_fence_match:
             result = try_parse_json(code_fence_match.group(1).strip())
             if result is not None:
@@ -1931,9 +1686,7 @@ class Filter:
                             return result
                         break
 
-        logger.warning(
-            "⚠️ Unable to extract valid JSON from LLM response; ensure the LLM returns only JSON (see consolidation prompt)"
-        )
+        logger.warning("⚠️ Unable to extract valid JSON from LLM response; ensure the LLM returns only JSON (see consolidation prompt)")
         return []
 
     @classmethod
@@ -1959,22 +1712,14 @@ class Filter:
             if loop and loop.is_running():
                 loop.call_soon_threadsafe(asyncio.create_task, cls.cleanup())
             else:
-                logger.warning(
-                    "⚠️ aiohttp session finalized without running event loop; call await Filter.cleanup() for graceful shutdown"
-                )
+                logger.warning("⚠️ aiohttp session finalized without running event loop; call await Filter.cleanup() for graceful shutdown")
         except Exception as e:
             logger.error(f"❌ Error in session finalizer: {e}")
 
     def __del__(self):
         """Destructor - logs warning if cleanup wasn't called explicitly."""
         try:
-            if (
-                hasattr(self.__class__, "_aiohttp_session")
-                and self.__class__._aiohttp_session
-                and not self.__class__._aiohttp_session.closed
-            ):
-                logger.warning(
-                    "Filter instance finalized; aiohttp session still open (finalizer may handle cleanup)"
-                )
+            if hasattr(self.__class__, "_aiohttp_session") and self.__class__._aiohttp_session and not self.__class__._aiohttp_session.closed:
+                logger.warning("Filter instance finalized; aiohttp session still open (finalizer may handle cleanup)")
         except:
             pass
