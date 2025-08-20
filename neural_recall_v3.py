@@ -175,14 +175,6 @@ Actively **EXCLUDE** memories that are:
 
 ---
 
-### OUTPUT CONTRACT
-- **RETURN ONLY A JSON ARRAY OF STRINGS.**
-- The strings must be the memory IDs, ordered from most to least relevant.
-- If no candidate memories materially improve the response, return an empty array `[]`.
-- **ABSOLUTELY NO COMMENTARY, EXPLANATIONS, OR CODE FENCES.**
-
----
-
 ### EXAMPLES
 
 **1) Project Status Query ("What's the latest on the Phoenix project?")**
@@ -197,6 +189,15 @@ Actively **EXCLUDE** memories that are:
 * **User Query:** "Can you recommend a good book about Roman history?"
 * **Candidates:** `["mem-201: User enjoys reading science fiction novels", "mem-202: User has a degree in European History", "mem-203: User's favorite author is Neal Stephenson"]`
 * **Expected Output:** `[]` // The memories are about the user's reading habits, but they don't help in recommending a *Roman history* book. They are not directly relevant to the specific request.
+
+---
+
+### OUTPUT CONTRACT
+- **RETURN ONLY A JSON ARRAY OF STRINGS.**
+- The strings must be the memory IDs, ordered from most to least relevant.
+- If no candidate memories materially improve the response, return an empty array `[]`.
+- **ABSOLUTELY NO COMMENTARY, EXPLANATIONS, OR CODE FENCES.**
+
 """
 
 MEMORY_CONSOLIDATION_PROMPT = f"""You are the Neural Recall Consolidator, a meticulous component of the Consolidation Pipeline. Your primary function is to enrich the user's memory profile with high-value, fact-based memories derived from conversation. Your secondary function is to perform database hygiene (merging, updating, splitting) with a strict bias towards **information preservation**.
@@ -1126,11 +1127,6 @@ class Filter:
         for memory_id in ranked_ids:
             if memory_id in memory_lookup:
                 ranked_memories.append(memory_lookup[memory_id])
-
-        ranked_ids_set = set(ranked_ids)
-        for memory in candidate_memories:
-            if memory["id"] not in ranked_ids_set:
-                ranked_memories.append(memory)
 
         final_memories = ranked_memories[: self.valves.max_memories_returned]
 
