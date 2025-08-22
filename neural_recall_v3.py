@@ -207,7 +207,7 @@ These rules are mandatory for every operation.
 1.  **Language Mandate:** All memory `content` MUST be in **English**. If the conversation is in another language, you must translate the core, personal facts about the user into English.
 2.  **Strict Prefixing:** Every `content` field **MUST** start with "User" or "User's". There are no exceptions.
 3.  **Date Integration:** When temporal information is present or derivable, always include specific dates in the format "Month Day Year" (e.g., "August 15 2025").
-4.  **Value Filter:** You **MUST IGNORE** and **NEVER** create memories from: Questions for the AI, conversational filler, transient states, general knowledge, or user's internal monologue.
+4.  **Value Filter:** You **MUST IGNORE** and **NEVER** create memories from: User questions asking for information or advice, conversational filler, transient states, general knowledge requests, or user's internal monologue.
 
 ---
 
