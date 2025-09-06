@@ -33,26 +33,31 @@ logger.setLevel(logging.INFO)
 
 class NeuralRecallError(Exception):
     """Base exception for Neural Recall operations."""
+
     pass
 
 
 class ModelLoadError(NeuralRecallError):
     """Raised when sentence transformer model fails to load."""
+
     pass
 
 
 class EmbeddingError(NeuralRecallError):
     """Raised when embedding generation fails."""
+
     pass
 
 
 class MemoryOperationError(NeuralRecallError):
     """Raised when memory operations fail."""
+
     pass
 
 
 class ValidationError(NeuralRecallError):
     """Raised when data validation fails."""
+
     pass
 
 
@@ -141,7 +146,7 @@ Apply these rules in strict order to build the final, ranked list of memory IDs:
 2.  **Contextual Enhancement:** After direct hits, select memories that provide essential background context (preferences, goals, constraints) needed for a personalized response.
 3.  **Thematic Focus:** Prioritize memories with single-concept clarity over those mixing multiple unrelated topics.
 4.  **Temporal Precedence:** When memories conflict, the one with the most recent, specific date **always wins**. A memory stating a project was "completed on August 15 2025" supersedes one saying it's "in progress."
-5.  **Specificity Over Generality:** A specific memory ("User dislikes spicy Thai food") is more valuable than a general one ("User enjoys Asian cuisine").
+5.  **Specificity Over Generality:** A specific memory ("I dislike spicy Thai food") is more valuable than a general one ("I enjoy Asian cuisine").
 
 ### 🚫 EXCLUSION CRITERIA
 Actively **EXCLUDE** memories that are:
@@ -156,16 +161,16 @@ Actively **EXCLUDE** memories that are:
 ### EXAMPLES
 
 **1) Project Status Query ("What's the latest on the Phoenix project?")**
-* **Candidates:** `["mem-101: User is the lead on Project Phoenix, a data migration initiative due on October 1 2025", "mem-102: User is a project manager with a PMP certification", "mem-103: User's main stakeholder for Project Phoenix is named Sarah Jenkins", "mem-104: User is experiencing a blocker on Project Phoenix related to API authentication as of August 14 2025"]`
+* **Candidates:** `["mem-101: I am the lead on Project Phoenix, a data migration initiative due on October 1 2025", "mem-102: I am a project manager with a PMP certification", "mem-103: My main stakeholder for Project Phoenix is named Sarah Jenkins", "mem-104: I am experiencing a blocker on Project Phoenix related to API authentication as of August 14 2025"]`
 * **Expected Output:** `["mem-104","mem-101","mem-103","mem-102"]`
 
 **2) Cooking Advice ("What should I make for dinner tonight? I want something quick.")**
-* **Candidates:** `["mem-010: User is vegetarian with a severe nut allergy", "mem-011: User enjoys Italian food", "mem-012: User works from home in Seattle", "mem-013: User bought fresh tomatoes and basil yesterday", "mem-014: User dislikes cleaning up complex recipes on weekdays"]`
+* **Candidates:** `["mem-010: I am vegetarian with a severe nut allergy", "mem-011: I enjoy Italian food", "mem-012: I work from home in Seattle", "mem-013: I bought fresh tomatoes and basil yesterday", "mem-014: I dislike cleaning up complex recipes on weekdays"]`
 * **Expected Output:** `["mem-010","mem-014","mem-013","mem-011"]`
 
 **3) NEGATIVE EXAMPLE (Trivially Related)**
 * **User Query:** "Can you recommend a good book about Roman history?"
-* **Candidates:** `["mem-201: User enjoys reading science fiction novels", "mem-202: User has a degree in European History", "mem-203: User's favorite author is Neal Stephenson"]`
+* **Candidates:** `["mem-201: I enjoy reading science fiction novels", "mem-202: I have a degree in European History", "mem-203: My favorite author is Neal Stephenson"]`
 * **Expected Output:** `[]` // The memories are about the user's reading habits, but they don't help in recommending a *Roman history* book. They are not directly relevant to the specific request.
 
 ---
@@ -196,7 +201,7 @@ Your objective is to build a high-fidelity, long-term user profile. The memories
 These rules are mandatory for every operation.
 
 1.  **Language Mandate:** All memory `content` MUST be in **English**. If the conversation is in another language, you must translate the core, personal facts about the user into English.
-2.  **Strict Prefixing:** Every `content` field **MUST** start with "User" or "User's". There are no exceptions.
+2.  **Strict Prefixing:** Every `content` field **MUST** use **first-person format** (e.g., "I am", "I have", "My", "My wife", "My boss", "My company"). There are no exceptions.
 3.  **Date Integration:** When temporal information is present or derivable, always include specific dates in the format "Month Day Year" (e.g., "August 15 2025").
 4.  **Value Filter:** You **MUST IGNORE** and **NEVER** create memories from: User curiosity about general topics, questions seeking information/advice, conversational filler, transient states, speculation, or hypotheticals. **ONLY CREATE** memories for concrete facts about the user's life, experiences, or preferences.
 
@@ -211,16 +216,16 @@ Analyze the user's message and candidate memories to determine if any of the fol
 - **Example:**
     - **Conversation:** "My daughter is starting kindergarten next month, so I'm adjusting my work schedule to be free in the afternoons."
     - **Current Date/Time:** "August 15 2025"
-    - **Existing Memories:** `["mem-101: User has a daughter"]`
-    - **Output:** `[{{"operation":"CREATE","content":"User's daughter is starting kindergarten in September 2025"}}, {{"operation":"CREATE","content":"User is adjusting work schedule to be free in afternoons starting September 2025"}}]`
+    - **Existing Memories:** `["mem-101: I have a daughter"]`
+    - **Output:** `[{{"operation":"CREATE","content":"My daughter is starting kindergarten in September 2025"}}, {{"operation":"CREATE","content":"I am adjusting my work schedule to be free in afternoons starting September 2025"}}]`
 
 #### `UPDATE` (Temporal Progression)
 - **Justification:** New information clearly supersedes or refines an existing memory with SUBSTANTIAL change.
 - **Example:**
     - **Conversation:** "I finally finished my PMP certification course yesterday."
     - **Current Date/Time:** "August 15 2025"
-    - **Existing Memories:** `["mem-201: User is studying for a PMP certification"]`
-    - **Output:** `[{{"operation":"UPDATE","id":"mem-201","content":"User completed their PMP certification on August 14 2025"}}]`
+    - **Existing Memories:** `["mem-201: I am studying for a PMP certification"]`
+    - **Output:** `[{{"operation":"UPDATE","id":"mem-201","content":"I completed my PMP certification on August 14 2025"}}]`
 
 #### `MERGE` (Showcasing Informational Density)
 - **Justification:** Multiple fragmented memories about the SAME entity can be consolidated into a single, dense memory ONLY when they share thematic coherence.
@@ -228,14 +233,14 @@ Analyze the user's message and candidate memories to determine if any of the fol
 - **Example:**
     - **Conversation:** "The deadline for Project Phoenix is now October 1st. The main stakeholder is Sarah Jenkins."
     - **Current Date/Time:** "August 15 2025"
-    - **Existing Memories:** `["mem-301: User is working on Project Phoenix", "mem-302: Project Phoenix is a data migration initiative"]`
-    - **Output:** `[{{"operation":"UPDATE","id":"mem-301","content":"User is the lead on Project Phoenix, a data migration initiative due on October 1 2025"}}, {{"operation":"DELETE","id":"mem-302"}}, {{"operation":"CREATE","content":"User's main stakeholder for Project Phoenix is named Sarah Jenkins"}}]`
+    - **Existing Memories:** `["mem-301: I am working on Project Phoenix", "mem-302: Project Phoenix is a data migration initiative"]`
+    - **Output:** `[{{"operation":"UPDATE","id":"mem-301","content":"I am the lead on Project Phoenix, a data migration initiative due on October 1 2025"}}, {{"operation":"DELETE","id":"mem-302"}}, {{"operation":"CREATE","content":"My main stakeholder for Project Phoenix is named Sarah Jenkins"}}]`
 
 #### `SPLIT` (Enforcing Atomicity)
 - **Justification:** An existing memory bundles distinct atomic facts that violate Thematic Separation and should be separated for better precision.
 - **Example:**
-    - **Existing Memories:** `["mem-401: User is a vegetarian and their favorite movie is Blade Runner"]`
-    - **Output:** `[{{"operation":"UPDATE","id":"mem-401","content":"User is a vegetarian"}}, {{"operation":"CREATE","content":"User's favorite movie is Blade Runner"}}]`
+    - **Existing Memories:** `["mem-401: I am a vegetarian and my favorite movie is Blade Runner"]`
+    - **Output:** `[{{"operation":"UPDATE","id":"mem-401","content":"I am a vegetarian"}}, {{"operation":"CREATE","content":"My favorite movie is Blade Runner"}}]`
 
 ---
 
@@ -316,18 +321,16 @@ class LRUCache:
             return size
 
 
-
-
 class Filter:
     """Enhanced multi-model embedding and memory filter with LRU caching."""
 
     _model = None
     _model_load_lock = None
     _embedding_cache: Dict[str, LRUCache] = {}
-    _cache_access_order: List[str] = []
-    _cache_lock = None
+    _cache_access_order: OrderedDict[str, None] = OrderedDict()
+    _cache_lock = asyncio.Lock()
     _aiohttp_session: Optional[aiohttp.ClientSession] = None
-    _session_lock = None
+    _session_lock = asyncio.Lock()
 
     class Valves(BaseModel):
         """Configuration valves for the Neural Recall system."""
@@ -346,7 +349,7 @@ class Filter:
         )
 
         embedding_model: str = Field(
-            default="Alibaba-NLP/gte-multilingual-base",
+            default="paraphrase-multilingual-mpnet-base-v2",
             description="Sentence transformer model for embeddings",
         )
 
@@ -411,26 +414,32 @@ class Filter:
 
     async def _get_user_cache(self, user_id: str) -> LRUCache:
         """Get or create user-specific embedding cache with global user limit."""
-        if Filter._cache_lock is None:
-            Filter._cache_lock = asyncio.Lock()
-
         async with Filter._cache_lock:
             if user_id in Filter._embedding_cache:
-                if user_id in Filter._cache_access_order:
-                    Filter._cache_access_order.remove(user_id)
-                Filter._cache_access_order.append(user_id)
+                Filter._cache_access_order.move_to_end(user_id)
                 return Filter._embedding_cache[user_id]
 
             if len(Filter._embedding_cache) >= Config.MAX_USER_CACHES:
                 if Filter._cache_access_order:
-                    lru_user_id = Filter._cache_access_order.pop(0)
+                    lru_user_id, _ = Filter._cache_access_order.popitem(last=False)
                     if lru_user_id in Filter._embedding_cache:
                         del Filter._embedding_cache[lru_user_id]
                         logger.info(f"🧹 Cache evicted for user {lru_user_id}")
 
             Filter._embedding_cache[user_id] = LRUCache(Config.CACHE_MAX_SIZE)
-            Filter._cache_access_order.append(user_id)
+            Filter._cache_access_order[user_id] = None
             return Filter._embedding_cache[user_id]
+
+    def _calculate_cosine_similarity(self, embedding1: np.ndarray, embedding2: np.ndarray, memory_id: str = None) -> float:
+        """Calculate cosine similarity between two normalized embeddings."""
+        similarity = np.dot(embedding1, embedding2).item()
+
+        if not (-1.0 <= similarity <= 1.0):
+            context = f" for memory {memory_id}" if memory_id else ""
+            logger.warning(f"⚠️ Unexpected similarity score {similarity:.4f}{context}")
+            similarity = max(-1.0, min(1.0, similarity))
+
+        return similarity
 
     async def _generate_embedding(self, text: str, user_id: str) -> np.ndarray:
         """Generate embedding for text with caching support."""
@@ -452,6 +461,10 @@ class Filter:
                 norm = np.linalg.norm(embedding)
                 if norm > 0:
                     embedding = embedding / norm
+                else:
+                    logger.warning(f"⚠️ Zero-norm embedding detected for text: {text[:50]}...")
+                    embedding = np.random.normal(0, 0.01, embedding.shape)
+                    embedding = embedding / np.linalg.norm(embedding)
                 return embedding
 
             loop = asyncio.get_event_loop()
@@ -502,26 +515,41 @@ class Filter:
                 def generate_batch_embeddings(batch_texts):
                     embeddings = model.encode(batch_texts, convert_to_numpy=True, show_progress_bar=False)
                     normalized_embeddings = []
-                    for embedding in embeddings:
+                    for i, embedding in enumerate(embeddings):
                         norm = np.linalg.norm(embedding)
                         if norm > 0:
                             embedding = embedding / norm
+                        else:
+                            logger.warning(f"⚠️ Zero-norm embedding detected in batch for text: {batch_texts[i][:50]}...")
+                            embedding = np.random.normal(0, 0.01, embedding.shape)
+                            embedding = embedding / np.linalg.norm(embedding)
                         normalized_embeddings.append(embedding)
                     return normalized_embeddings
 
                 loop = asyncio.get_event_loop()
 
-                for i in range(0, len(uncached_texts), batch_size):
-                    batch_texts = uncached_texts[i : i + batch_size]
-                    batch_indices = uncached_indices[i : i + batch_size]
-
+                async def process_batch(batch_texts: List[str], batch_indices: List[int]) -> List[Tuple[int, str, np.ndarray]]:
+                    """Process a single batch and return results with indices."""
                     batch_embeddings = await loop.run_in_executor(None, generate_batch_embeddings, batch_texts)
-
+                    results = []
                     for j, embedding in enumerate(batch_embeddings):
                         text_idx = batch_indices[j]
                         text = batch_texts[j]
-                        text_hash = hashlib.sha256(text.encode()).hexdigest()
+                        results.append((text_idx, text, embedding))
+                    return results
 
+                batch_tasks = []
+                for i in range(0, len(uncached_texts), batch_size):
+                    batch_texts = uncached_texts[i : i + batch_size]
+                    batch_indices = uncached_indices[i : i + batch_size]
+                    task = asyncio.create_task(process_batch(batch_texts, batch_indices))
+                    batch_tasks.append(task)
+
+                batch_results = await asyncio.gather(*batch_tasks)
+
+                for batch_result in batch_results:
+                    for text_idx, text, embedding in batch_result:
+                        text_hash = hashlib.sha256(text.encode()).hexdigest()
                         await cache.put(text_hash, embedding)
                         new_embeddings[text_idx] = embedding
 
@@ -546,9 +574,6 @@ class Filter:
     async def _get_aiohttp_session(self) -> aiohttp.ClientSession:
         """Get or create aiohttp session with connection pooling and production settings."""
         if Filter._aiohttp_session is None or Filter._aiohttp_session.closed:
-            if Filter._session_lock is None:
-                Filter._session_lock = asyncio.Lock()
-
             async with Filter._session_lock:
                 if Filter._aiohttp_session is None or Filter._aiohttp_session.closed:
                     timeout = aiohttp.ClientTimeout(total=Config.TIMEOUT_SESSION_REQUEST)
@@ -670,7 +695,8 @@ class Filter:
             count_lines(r"^\s*[-\*\+]\s+.+") >= max(SkipThresholds.STRUCTURED_BULLET_MIN, threshold),
             count_lines(r"^\s*\d+\.\s") >= threshold,
             count_lines(r"^\s*[a-zA-Z]\)\s") >= threshold,
-            sum(1 for line in message_lines if "|" in line and line.count("|") >= SkipThresholds.STRUCTURED_PIPE_MIN) >= max(SkipThresholds.STRUCTURED_PIPE_MIN, threshold),
+            sum(1 for line in message_lines if "|" in line and line.count("|") >= SkipThresholds.STRUCTURED_PIPE_MIN)
+            >= max(SkipThresholds.STRUCTURED_PIPE_MIN, threshold),
         ]
 
         return any(structured_checks)
@@ -758,8 +784,6 @@ class Filter:
         except Exception as e:
             raise NeuralRecallError(f"Failed to format datetime: {e}")
 
-
-
     async def _emit_status(
         self,
         emitter: Optional[Callable[[Any], Awaitable[None]]],
@@ -817,7 +841,7 @@ class Filter:
             if memory_embedding is None:
                 continue
 
-            similarity = float(np.dot(query_embedding, memory_embedding))
+            similarity = self._calculate_cosine_similarity(query_embedding, memory_embedding, str(memory.id))
 
             if similarity >= self.valves.semantic_threshold:
                 memory_dict = {
@@ -916,9 +940,9 @@ class Filter:
         if memories and user_id:
             n = len(memories)
             if n == 1:
-                memory_header = "BACKGROUND: You naturally know this fact. Never mention its source."
+                memory_header = "BACKGROUND: The user has shared this personal information with you. Remember it naturally without mentioning its source."
             else:
-                memory_header = f"BACKGROUND: You naturally know these {n} facts. Never mention their source."
+                memory_header = f"BACKGROUND: The user has shared these {n} pieces of personal information with you. Remember them naturally without mentioning their source."
 
             memory_content = "\n".join([f"- {memory['content']}" for memory in memories])
             content_parts.append(f"{memory_header}\n{memory_content}")
@@ -976,7 +1000,7 @@ class Filter:
             if memory_embedding is None:
                 continue
 
-            similarity = float(np.dot(query_embedding, memory_embedding))
+            similarity = self._calculate_cosine_similarity(query_embedding, memory_embedding, str(memory.id))
 
             if similarity >= relaxed_threshold:
                 created_at_iso = None
@@ -1089,6 +1113,8 @@ class Filter:
 
         for operation in operations:
             if isinstance(operation, dict):
+                if operation.get("operation") not in ["CREATE", "UPDATE", "DELETE"]:
+                    continue
                 memory_operation = MemoryOperation(**operation)
                 if memory_operation.validate_operation(existing_memory_ids):
                     valid_operations.append(operation)
@@ -1117,27 +1143,61 @@ class Filter:
             logger.error(f"❌ {error_msg}")
             raise MemoryOperationError(error_msg)
 
-        created_count = 0
-        updated_count = 0
-        deleted_count = 0
-        failed_count = 0
+        create_operations = []
+        update_operations = []
+        delete_operations = []
 
-        for i, operation_data in enumerate(operations):
-            try:
-                operation = MemoryOperation(**operation_data)
-                result = await self._execute_single_operation(operation, user)
-                if result == "CREATE":
-                    created_count += 1
-                elif result == "UPDATE":
-                    updated_count += 1
-                elif result == "DELETE":
-                    deleted_count += 1
-            except Exception as e:
-                failed_count += 1
-                operation_type = operation_data.get("operation", "UNKNOWN")
-                operation_id = operation_data.get("id", "no-id")
-                logger.error(f"❌ Failed to execute {operation_type} operation {i+1}/{len(operations)} (ID: {operation_id}): {str(e)}")
-                continue
+        for operation_data in operations:
+            operation_type = operation_data.get("operation", "UNKNOWN")
+            if operation_type == "CREATE":
+                create_operations.append(operation_data)
+            elif operation_type == "UPDATE":
+                update_operations.append(operation_data)
+            elif operation_type == "DELETE":
+                delete_operations.append(operation_data)
+
+        async def execute_operation_batch(
+            ops_batch: List[Dict[str, Any]],
+        ) -> List[Tuple[str, bool]]:
+            """Execute a batch of operations concurrently."""
+            tasks = []
+            for op_data in ops_batch:
+                try:
+                    operation = MemoryOperation(**op_data)
+                    task = asyncio.create_task(self._execute_single_operation(operation, user))
+                    tasks.append((task, op_data))
+                except Exception as e:
+                    logger.error(f"❌ Failed to create operation from data {op_data}: {str(e)}")
+                    tasks.append((None, op_data))
+
+            results = []
+            for task, op_data in tasks:
+                if task is None:
+                    results.append(("FAILED", False))
+                    continue
+
+                try:
+                    result = await task
+                    results.append((result, True))
+                except Exception as e:
+                    operation_type = op_data.get("operation", "UNKNOWN")
+                    operation_id = op_data.get("id", "no-id")
+                    logger.error(f"❌ Failed to execute {operation_type} operation (ID: {operation_id}): {str(e)}")
+                    results.append(("FAILED", False))
+
+            return results
+
+        all_results = []
+
+        for ops_batch in [delete_operations, update_operations, create_operations]:
+            if ops_batch:
+                batch_results = await execute_operation_batch(ops_batch)
+                all_results.extend(batch_results)
+
+        created_count = sum(1 for result, success in all_results if success and result == "CREATE")
+        updated_count = sum(1 for result, success in all_results if success and result == "UPDATE")
+        deleted_count = sum(1 for result, success in all_results if success and result == "DELETE")
+        failed_count = sum(1 for result, success in all_results if not success)
 
         total_executed = created_count + updated_count + deleted_count
         logger.info(
@@ -1308,17 +1368,13 @@ class Filter:
 
     async def _invalidate_user_cache(self, user_id: str, reason: str = "") -> None:
         """Invalidate all cache entries for a specific user."""
-        if Filter._cache_lock is None:
-            Filter._cache_lock = asyncio.Lock()
-
         async with Filter._cache_lock:
             if user_id in Filter._embedding_cache:
                 user_cache = Filter._embedding_cache[user_id]
                 await user_cache.clear()
                 logger.info(f"🧹 Embedding cache cleared for user {user_id} (reason: {reason})")
 
-                if user_id in Filter._cache_access_order:
-                    Filter._cache_access_order.remove(user_id)
+                Filter._cache_access_order.pop(user_id, None)
 
     def _clean_memory_content(self, content: str) -> str:
         """Clean memory content and validate length limits."""
@@ -1438,8 +1494,34 @@ class Filter:
                 await cls._aiohttp_session.close()
                 logger.info("✅ HTTP session closed gracefully")
 
+            if cls._embedding_cache:
+                for user_cache in cls._embedding_cache.values():
+                    await user_cache.clear()
+                cls._embedding_cache.clear()
+                cls._cache_access_order.clear()
+                logger.info("✅ Embedding caches cleared")
+
         except Exception as e:
             logger.error(f"❌ Error during cleanup: {e}")
+
+    @classmethod
+    async def force_cleanup(cls) -> None:
+        """Force cleanup of all resources, even if they're in use."""
+        try:
+            if cls._aiohttp_session:
+                if not cls._aiohttp_session.closed:
+                    await cls._aiohttp_session.close()
+                cls._aiohttp_session = None
+
+            cls._embedding_cache.clear()
+            cls._cache_access_order.clear()
+
+            cls._model = None
+
+            logger.info("✅ Force cleanup completed")
+
+        except Exception as e:
+            logger.error(f"❌ Error during force cleanup: {e}")
 
     @classmethod
     def _auto_cleanup_finalizer(cls) -> None:
