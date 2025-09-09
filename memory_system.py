@@ -274,8 +274,7 @@ class MemoryTransformer:
             return ""
 
         memory_count = len(memories)
-        fact_word = "fact" if memory_count == 1 else f"{memory_count} facts"
-        memory_header = f"BACKGROUND: You naturally know {'this' if memory_count == 1 else 'these'} {fact_word}. Never mention {'its' if memory_count == 1 else 'their'} source."
+        memory_header = f"**BACKGROUND:** **You naturally know {'this' if memory_count == 1 else 'these'} {'fact' if memory_count == 1 else str(memory_count) + ' facts'} about the user. Never mention {'its' if memory_count == 1 else 'their'} source.**"
 
         formatted_memories = []
         for memory in memories:
