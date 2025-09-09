@@ -16,7 +16,12 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import aiohttp
 import numpy as np
-from pydantic import BaseModel, Field, ValidationError as PydanticValidationError, model_validator
+from pydantic import (
+    BaseModel,
+    Field,
+    ValidationError as PydanticValidationError,
+    model_validator,
+)
 from sentence_transformers import SentenceTransformer
 
 from open_webui.models.users import Users
@@ -68,7 +73,7 @@ class AsyncOperationManager:
 
 class MemorySystemError(Exception):
     """Exception for Memory System operations with optional error context."""
-    
+
     def __init__(self, message: str, context: str = None):
         self.context = context
         super().__init__(f"{context}: {message}" if context else message)
@@ -97,11 +102,9 @@ class ConfigManager:
         TIMEOUT_SESSION_REQUEST = 30
         TIMEOUT_DATABASE_OPERATION = 10
         TIMEOUT_USER_LOOKUP = 5
-        DEFAULT_MAX_MEMORIES_RETURNED = 15
-        MIN_DYNAMIC_THRESHOLD = 0.45
-        MAX_DYNAMIC_THRESHOLD = 0.90
-        PERCENTILE_THRESHOLD = 90
-        CONSOLIDATION_RELAXED_MULTIPLIER = 0.90
+        DEFAULT_MAX_MEMORIES_RETURNED = 10
+        MIN_RETRIEVAL_THRESHOLD = 0.5
+        RELAXED_RETRIEVAL_MULTIPLIER = 0.8
         MIN_BATCH_SIZE = 8
         MAX_BATCH_SIZE = 32
         RETRIEVAL_MULTIPLIER = 2.0
@@ -176,7 +179,10 @@ class ContentPatternDetector:
         if line_count < ConfigManager.SkipThresholds.STRUCTURED_LINE_COUNT_MIN:
             return False
 
-        threshold = max(ConfigManager.SkipThresholds.STRUCTURED_LINE_COUNT_MIN, line_count * ConfigManager.SkipThresholds.STRUCTURED_PERCENTAGE_THRESHOLD)
+        threshold = max(
+            ConfigManager.SkipThresholds.STRUCTURED_LINE_COUNT_MIN,
+            line_count * ConfigManager.SkipThresholds.STRUCTURED_PERCENTAGE_THRESHOLD,
+        )
 
         checks = [
             ContentPatternDetector._count_line_matches(lines, r"^\s*[A-Za-z0-9_]+:\s+\S+") >= threshold,
@@ -211,7 +217,10 @@ class ContentPatternDetector:
         line_count = len(lines)
 
         error_patterns = ContentPatternDetector._get_error_patterns()
-        log_patterns = [r"\d{2,4}[-/]\d{1,2}[-/]\d{1,2}[\s\d:]+\b(ERROR|WARN|INFO|DEBUG)\b", r"\bERROR\b.*:.*"]
+        log_patterns = [
+            r"\d{2,4}[-/]\d{1,2}[-/]\d{1,2}[\s\d:]+\b(ERROR|WARN|INFO|DEBUG)\b",
+            r"\bERROR\b.*:.*",
+        ]
 
         if ContentPatternDetector._check_patterns(message, error_patterns + log_patterns):
             return True
@@ -220,13 +229,20 @@ class ContentPatternDetector:
             return False
 
         datetime_matches = sum(1 for line in lines if re.search(r"\d{2,4}[-/]\d{1,2}[-/]\d{1,2}.*\d{1,2}:\d{2}", line))
-        return datetime_matches >= max(ConfigManager.SkipThresholds.LOGS_MIN_MATCHES, line_count * ConfigManager.SkipThresholds.LOGS_MATCH_PERCENTAGE)
+        return datetime_matches >= max(
+            ConfigManager.SkipThresholds.LOGS_MIN_MATCHES,
+            line_count * ConfigManager.SkipThresholds.LOGS_MATCH_PERCENTAGE,
+        )
 
     @staticmethod
     def is_stack_trace(message: str) -> bool:
         lines = message.split("\n")
         error_patterns = ContentPatternDetector._get_error_patterns()
-        stack_patterns = [r"^\s*(Traceback|Exception|Error).*:\d+", r"Traceback\s*\(most recent call", r'^\s*File\s*"[^"]+",\s*line\s*\d+']
+        stack_patterns = [
+            r"^\s*(Traceback|Exception|Error).*:\d+",
+            r"Traceback\s*\(most recent call",
+            r'^\s*File\s*"[^"]+",\s*line\s*\d+',
+        ]
         return any(any(re.search(pattern, line) for pattern in error_patterns + stack_patterns) for line in lines)
 
     @staticmethod
@@ -241,22 +257,22 @@ class MemoryTransformer:
             "id": str(memory.id),
             "content": memory.content,
         }
-        
+
         if relevance is not None:
             memory_dict["relevance"] = relevance
-            
+
         if hasattr(memory, "created_at") and memory.created_at:
             memory_dict["created_at"] = datetime.fromtimestamp(memory.created_at, tz=timezone.utc).isoformat()
         if hasattr(memory, "updated_at") and memory.updated_at:
             memory_dict["updated_at"] = datetime.fromtimestamp(memory.updated_at, tz=timezone.utc).isoformat()
-            
+
         return memory_dict
 
     @staticmethod
     def to_context_format(memories: List[Dict[str, Any]]) -> str:
         if not memories:
             return ""
-            
+
         memory_count = len(memories)
         fact_word = "fact" if memory_count == 1 else f"{memory_count} facts"
         memory_header = f"BACKGROUND: You naturally know {'this' if memory_count == 1 else 'these'} {fact_word}. Never mention {'its' if memory_count == 1 else 'their'} source."
@@ -265,25 +281,33 @@ class MemoryTransformer:
         for memory in memories:
             clean_content = " ".join(memory["content"].replace("\n", " ").replace("\r", " ").split())
             formatted_memories.append(f"- {clean_content}")
-            
+
         return f"{memory_header}\n{chr(10).join(formatted_memories)}"
 
 
 class SimilarityService:
-    def __init__(self, embedding_generator, cache_service):
+    def __init__(self, embedding_generator):
         self.embedding_generator = embedding_generator
-        self.cache_service = cache_service
 
-    async def compute_similarities(self, user_message: str, user_id: str, user_memories: List, limit_multiplier: float = 1.0) -> Tuple[List[Dict], float, List[Dict]]:
+    async def compute_similarities(
+        self,
+        user_message: str,
+        user_id: str,
+        user_memories: List,
+        limit_multiplier: float = 1.0,
+    ) -> Tuple[List[Dict], float, List[Dict]]:
         if not user_memories:
-            return [], ConfigManager.SystemConfig.MIN_DYNAMIC_THRESHOLD, []
+            return [], self.embedding_generator.valves.semantic_retrieval_threshold, []
 
         query_embedding = await self.embedding_generator._generate_embedding(user_message, user_id)
         memory_contents = [memory.content for memory in user_memories]
         memory_embeddings = await self.embedding_generator._generate_embeddings_batch(memory_contents, user_id)
 
         if len(memory_embeddings) != len(user_memories):
-            raise MemorySystemError(f"Embedding count mismatch: {len(memory_embeddings)} vs {len(user_memories)}", "Similarity computation")
+            raise MemorySystemError(
+                f"Embedding count mismatch: {len(memory_embeddings)} vs {len(user_memories)}",
+                "Similarity computation",
+            )
 
         similarity_scores = []
         memory_data = []
@@ -298,94 +322,20 @@ class SimilarityService:
             memory_data.append(MemoryTransformer.to_dict(memory, similarity))
 
         if not similarity_scores:
-            return [], ConfigManager.SystemConfig.MIN_DYNAMIC_THRESHOLD, []
+            return [], self.embedding_generator.valves.semantic_retrieval_threshold, []
 
         memory_data.sort(key=lambda x: x["relevance"], reverse=True)
-        
-        is_consolidation = limit_multiplier > 1.0
-        dynamic_threshold = self._calculate_dynamic_threshold(similarity_scores, is_consolidation)
 
-        filtered_memories = [m for m in memory_data if m["relevance"] >= dynamic_threshold]
+        is_consolidation = limit_multiplier > 1.0
+        threshold = (
+            self.embedding_generator._get_consolidation_threshold() if is_consolidation else self.embedding_generator.valves.semantic_retrieval_threshold
+        )
+
+        filtered_memories = [m for m in memory_data if m["relevance"] >= threshold]
         limit = int(ConfigManager.SystemConfig.DEFAULT_MAX_MEMORIES_RETURNED * limit_multiplier)
         filtered_memories = filtered_memories[:limit]
 
-        return filtered_memories, dynamic_threshold, memory_data
-
-    def _calculate_dynamic_threshold(self, similarity_scores: List[float], for_consolidation: bool = False) -> float:
-        if not similarity_scores:
-            return ConfigManager.SystemConfig.MIN_DYNAMIC_THRESHOLD
-
-        percentile_threshold = float(np.percentile(similarity_scores, ConfigManager.SystemConfig.PERCENTILE_THRESHOLD))
-        base_threshold = max(
-            ConfigManager.SystemConfig.MIN_DYNAMIC_THRESHOLD, 
-            min(ConfigManager.SystemConfig.MAX_DYNAMIC_THRESHOLD, percentile_threshold)
-        )
-
-        if for_consolidation:
-            return base_threshold * ConfigManager.SystemConfig.CONSOLIDATION_RELAXED_MULTIPLIER
-        return base_threshold
-
-
-class CacheService:
-    def __init__(self, cache_manager):
-        self.cache_manager = cache_manager
-
-    async def get_or_generate_embedding(self, text: str, user_id: str, generator_func) -> Optional[np.ndarray]:
-        if not text or len(text.strip()) < ConfigManager.SkipThresholds.MIN_QUERY_LENGTH:
-            return None
-            
-        cache = await self.cache_manager._create_user_cache(user_id)
-        text_hash = hashlib.sha256(text.encode()).hexdigest()
-        cached_embedding = await cache.get(text_hash)
-        
-        if cached_embedding is not None:
-            return cached_embedding
-            
-        generated_embedding = await generator_func(text)
-        if generated_embedding is not None:
-            await cache.put(text_hash, generated_embedding)
-            
-        return generated_embedding
-
-    async def batch_get_or_generate(self, texts: List[str], user_id: str, batch_generator_func) -> List[Optional[np.ndarray]]:
-        cache = await self.cache_manager._create_user_cache(user_id)
-        cached_embeddings = {}
-        uncached_texts = []
-        uncached_indices = []
-
-        for text_index, text in enumerate(texts):
-            if not text or len(text.strip()) < ConfigManager.SkipThresholds.MIN_QUERY_LENGTH:
-                continue
-
-            text_hash = hashlib.sha256(text.encode()).hexdigest()
-            cached_embedding = await cache.get(text_hash)
-
-            if cached_embedding is not None:
-                cached_embeddings[text_index] = cached_embedding
-            else:
-                uncached_texts.append(text)
-                uncached_indices.append(text_index)
-
-        new_embeddings = {}
-        if uncached_texts:
-            batch_embeddings = await batch_generator_func(uncached_texts)
-            for batch_index, embedding in enumerate(batch_embeddings):
-                if embedding is not None:
-                    text_idx = uncached_indices[batch_index]
-                    text_hash = hashlib.sha256(uncached_texts[batch_index].encode()).hexdigest()
-                    await cache.put(text_hash, embedding)
-                    new_embeddings[text_idx] = embedding
-
-        result_embeddings = []
-        for text_index in range(len(texts)):
-            if text_index in cached_embeddings:
-                result_embeddings.append(cached_embeddings[text_index])
-            elif text_index in new_embeddings:
-                result_embeddings.append(new_embeddings[text_index])
-            else:
-                result_embeddings.append(None)
-
-        return result_embeddings
+        return filtered_memories, threshold, memory_data
 
 
 class ErrorHandler:
@@ -393,13 +343,13 @@ class ErrorHandler:
     def handle_operation_error(operation_data: Dict, operation_index: int, error: Exception) -> str:
         operation_type = operation_data.get("operation", "UNKNOWN")
         content_preview = ""
-        
+
         if "content" in operation_data:
             content = operation_data.get("content", "")
             content_preview = f" - Content: {content[:60]}..." if len(content) > 60 else f" - Content: {content}"
         elif "id" in operation_data:
             content_preview = f" - ID: {operation_data['id']}"
-            
+
         error_message = f"❌ Failed {operation_type} operation {operation_index+1}{content_preview}: {str(error)}"
         logger.error(error_message)
         return error_message
@@ -544,48 +494,36 @@ class ConsolidationResponse(BaseModel):
 
 
 class LRUCache:
-    """Enhanced thread-safe LRU cache implementation using OrderedDict with comprehensive metrics."""
+    """Asyncio-native LRU cache implementation using OrderedDict."""
 
     def __init__(self, max_size: int) -> None:
         """Initialize LRU cache with specified maximum size."""
         self.max_size = max_size
         self._cache: OrderedDict[str, Any] = OrderedDict()
-        self._lock = threading.RLock()
+        self._lock = asyncio.Lock()
 
     async def get(self, key: str) -> Optional[Any]:
         """Get an item from cache, moving it to end (most recently used)."""
-        def _get():
-            with self._lock:
-                if key in self._cache:
-                    value = self._cache.pop(key)
-                    self._cache[key] = value
-                    return value
-                return None
-        
-        loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(None, _get)
+        async with self._lock:
+            if key in self._cache:
+                value = self._cache.pop(key)
+                self._cache[key] = value
+                return value
+            return None
 
     async def put(self, key: str, value: Any) -> None:
         """Put an item in cache, evicting least recently used if necessary."""
-        def _put():
-            with self._lock:
-                if key in self._cache:
-                    self._cache.pop(key)
-                elif len(self._cache) >= self.max_size:
-                    self._cache.popitem(last=False)
-                self._cache[key] = value
-        
-        loop = asyncio.get_event_loop()
-        await loop.run_in_executor(None, _put)
+        async with self._lock:
+            if key in self._cache:
+                self._cache.pop(key)
+            elif len(self._cache) >= self.max_size:
+                self._cache.popitem(last=False)
+            self._cache[key] = value
 
     async def clear(self) -> None:
         """Clear cache and return number of entries cleared."""
-        def _clear():
-            with self._lock:
-                self._cache.clear()
-        
-        loop = asyncio.get_event_loop()
-        await loop.run_in_executor(None, _clear)
+        async with self._lock:
+            self._cache.clear()
 
 
 class Filter:
@@ -617,9 +555,10 @@ class Filter:
             description="Maximum number of memories to return in context",
         )
 
-        min_dynamic_threshold: float = Field(default=ConfigManager.SystemConfig.MIN_DYNAMIC_THRESHOLD, description="Minimum allowed dynamic threshold value")
-        max_dynamic_threshold: float = Field(default=ConfigManager.SystemConfig.MAX_DYNAMIC_THRESHOLD, description="Maximum allowed dynamic threshold value")
-        percentile_threshold: int = Field(default=ConfigManager.SystemConfig.PERCENTILE_THRESHOLD, description="Percentile to use for dynamic threshold calculation")
+        semantic_retrieval_threshold: float = Field(
+            default=ConfigManager.SystemConfig.MIN_RETRIEVAL_THRESHOLD,
+            description="Minimum similarity threshold for memory retrieval",
+        )
 
     def __init__(self):
         """Initialize the Memory System filter with production validation."""
@@ -629,15 +568,15 @@ class Filter:
         self._model = None
         self._model_load_lock = asyncio.Lock()
         self._embedding_cache: OrderedDict[str, LRUCache] = OrderedDict()
-        self._cache_lock = threading.RLock()
+        self._cache_lock = asyncio.Lock()
         self._aiohttp_session: Optional[aiohttp.ClientSession] = None
         self._session_lock = asyncio.Lock()
         self._background_tasks: set = set()
         self._shutdown_event = asyncio.Event()
-        self._retrieval_cache: OrderedDict[str, Dict] = OrderedDict()
-        
-        self._cache_service = CacheService(self)
-        self._similarity_service = SimilarityService(self, self._cache_service)
+        self._retrieval_cache = LRUCache(100)
+        self._memory_cache = LRUCache(50)
+
+        self._similarity_service = SimilarityService(self)
         self._error_handler = ErrorHandler()
 
     def _validate_system_configuration(self) -> None:
@@ -651,20 +590,17 @@ class Filter:
         if not self.valves.model or not self.valves.model.strip():
             raise MemorySystemError("Model not specified", "Configuration validation")
 
-        if not 1 <= self.valves.percentile_threshold <= 99:
-            raise MemorySystemError(f"Invalid percentile threshold: {self.valves.percentile_threshold}", "Configuration validation")
-
-        if not 0.0 <= self.valves.min_dynamic_threshold <= 1.0:
-            raise MemorySystemError(f"Invalid min dynamic threshold: {self.valves.min_dynamic_threshold}", "Configuration validation")
-
-        if not 0.0 <= self.valves.max_dynamic_threshold <= 1.0:
-            raise MemorySystemError(f"Invalid max dynamic threshold: {self.valves.max_dynamic_threshold}", "Configuration validation")
-
-        if self.valves.min_dynamic_threshold >= self.valves.max_dynamic_threshold:
-            raise MemorySystemError(f"Min threshold ({self.valves.min_dynamic_threshold}) must be less than max threshold ({self.valves.max_dynamic_threshold})", "Configuration validation")
-
         if self.valves.max_memories_returned <= 0:
-            raise MemorySystemError(f"Invalid max memories returned: {self.valves.max_memories_returned}", "Configuration validation")
+            raise MemorySystemError(
+                f"Invalid max memories returned: {self.valves.max_memories_returned}",
+                "Configuration validation",
+            )
+
+        if not (0.0 <= self.valves.semantic_retrieval_threshold <= 1.0):
+            raise MemorySystemError(
+                f"Invalid semantic retrieval threshold: {self.valves.semantic_retrieval_threshold} (must be 0.0-1.0)",
+                "Configuration validation",
+            )
 
         logger.info("✅ Configuration validated")
 
@@ -696,28 +632,58 @@ class Filter:
 
     async def _create_user_cache(self, user_id: str) -> LRUCache:
         """Get or create user-specific embedding cache with global user limit."""
-        def _create_cache():
-            with self._cache_lock:
-                if user_id in self._embedding_cache:
-                    self._embedding_cache.move_to_end(user_id)
-                    return self._embedding_cache[user_id]
-
-                if len(self._embedding_cache) >= ConfigManager.SystemConfig.MAX_USER_CACHES:
-                    self._embedding_cache.popitem(last=False)
-
-                self._embedding_cache[user_id] = LRUCache(ConfigManager.SystemConfig.CACHE_MAX_SIZE)
+        async with self._cache_lock:
+            if user_id in self._embedding_cache:
                 self._embedding_cache.move_to_end(user_id)
                 return self._embedding_cache[user_id]
 
-        loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(None, _create_cache)
+            if len(self._embedding_cache) >= ConfigManager.SystemConfig.MAX_USER_CACHES:
+                self._embedding_cache.popitem(last=False)
+
+            self._embedding_cache[user_id] = LRUCache(ConfigManager.SystemConfig.CACHE_MAX_SIZE)
+            self._embedding_cache.move_to_end(user_id)
+            return self._embedding_cache[user_id]
+
+    def _compute_text_hash(self, text: str) -> str:
+        """Compute SHA256 hash for text caching."""
+        return hashlib.sha256(text.encode()).hexdigest()
+
+    def _normalize_embedding(self, embedding: np.ndarray) -> np.ndarray:
+        """Normalize embedding vector."""
+        norm = np.linalg.norm(embedding)
+        return embedding / norm if norm > 0 else embedding
+
+    def _generate_single_embedding_sync(self, model, text: str) -> np.ndarray:
+        """Synchronous single embedding generation for executor."""
+        embedding = model.encode(text, convert_to_numpy=True, show_progress_bar=False)
+        return self._normalize_embedding(embedding)
+
+    def _generate_batch_embeddings_sync(self, model, texts: List[str]) -> List[np.ndarray]:
+        """Synchronous batch embedding generation for executor."""
+        embeddings = model.encode(texts, convert_to_numpy=True, show_progress_bar=False)
+        return [self._normalize_embedding(embedding) for embedding in embeddings]
 
     async def _generate_embedding(self, text: str, user_id: str) -> np.ndarray:
-        """Generate embedding for a single text using the batch method."""
-        embeddings = await self._generate_embeddings_batch([text], user_id)
-        if embeddings and embeddings[0] is not None:
-            return embeddings[0]
-        raise MemorySystemError("Failed to generate embedding for the given text", "Embedding generation")
+        """Generate embedding for a single text with optimized caching."""
+        if not text or len(text.strip()) < ConfigManager.SkipThresholds.MIN_QUERY_LENGTH:
+            raise MemorySystemError("Text too short for embedding generation", "Embedding generation")
+
+        cache = await self._create_user_cache(user_id)
+        text_hash = self._compute_text_hash(text)
+
+        cached_embedding = await cache.get(text_hash)
+        if cached_embedding is not None:
+            logger.info("📥 User message embedding: cache hit")
+            return cached_embedding
+
+        model = await self._load_embedding_model()
+        loop = asyncio.get_event_loop()
+        embedding = await loop.run_in_executor(None, self._generate_single_embedding_sync, model, text)
+
+        await cache.put(text_hash, embedding)
+
+        logger.info("💾 User message embedding: generated and cached")
+        return embedding
 
     async def _generate_embeddings_batch(self, texts: List[str], user_id: str) -> List[np.ndarray]:
         """Generate embeddings for multiple texts efficiently with batch processing and caching."""
@@ -733,7 +699,7 @@ class Filter:
             if not text or len(text.strip()) < ConfigManager.SkipThresholds.MIN_QUERY_LENGTH:
                 continue
 
-            text_hash = hashlib.sha256(text.encode()).hexdigest()
+            text_hash = self._compute_text_hash(text)
             cached_embedding = await cache.get(text_hash)
 
             if cached_embedding is not None:
@@ -745,24 +711,26 @@ class Filter:
         new_embeddings = {}
         if uncached_texts:
             model = await self._load_embedding_model()
-            batch_size = min(ConfigManager.SystemConfig.MAX_BATCH_SIZE, max(ConfigManager.SystemConfig.MIN_BATCH_SIZE, len(uncached_texts)))
-
-            def generate_batch_embeddings(batch_texts):
-                embeddings = model.encode(batch_texts, convert_to_numpy=True, show_progress_bar=False)
-                return [embedding / np.linalg.norm(embedding) if np.linalg.norm(embedding) > 0 else embedding for embedding in embeddings]
+            batch_size = min(
+                ConfigManager.SystemConfig.MAX_BATCH_SIZE,
+                max(ConfigManager.SystemConfig.MIN_BATCH_SIZE, len(uncached_texts)),
+            )
 
             loop = asyncio.get_event_loop()
 
             for batch_start in range(0, len(uncached_texts), batch_size):
                 batch_texts = uncached_texts[batch_start : batch_start + batch_size]
                 batch_indices = uncached_indices[batch_start : batch_start + batch_size]
-                batch_embeddings = await loop.run_in_executor(None, generate_batch_embeddings, batch_texts)
+                batch_embeddings = await loop.run_in_executor(None, self._generate_batch_embeddings_sync, model, batch_texts)
 
+                cache_operations = []
                 for batch_index, embedding in enumerate(batch_embeddings):
                     text_idx = batch_indices[batch_index]
-                    text_hash = hashlib.sha256(batch_texts[batch_index].encode()).hexdigest()
-                    await cache.put(text_hash, embedding)
+                    text_hash = self._compute_text_hash(batch_texts[batch_index])
+                    cache_operations.append(cache.put(text_hash, embedding))
                     new_embeddings[text_idx] = embedding
+
+                await asyncio.gather(*cache_operations)
 
         result_embeddings = []
         for text_index in range(len(texts)):
@@ -803,33 +771,60 @@ class Filter:
         Skips: empty, too long, code, logs, structured data, URL dumps, or symbol spam.
         """
         if not user_message or not user_message.strip():
-            return True, ConfigManager.SystemConfig.STATUS_MESSAGES[MemorySkipReason.SKIP_EMPTY]
+            return (
+                True,
+                ConfigManager.SystemConfig.STATUS_MESSAGES[MemorySkipReason.SKIP_EMPTY],
+            )
 
         trimmed_message = user_message.strip()
 
         if len(trimmed_message) < ConfigManager.SkipThresholds.MIN_QUERY_LENGTH:
-            return True, ConfigManager.SystemConfig.STATUS_MESSAGES[MemorySkipReason.SKIP_EMPTY]
+            return (
+                True,
+                ConfigManager.SystemConfig.STATUS_MESSAGES[MemorySkipReason.SKIP_EMPTY],
+            )
 
         if len(trimmed_message) > ConfigManager.SkipThresholds.MAX_MESSAGE_LENGTH:
-            return True, ConfigManager.SystemConfig.STATUS_MESSAGES[MemorySkipReason.SKIP_TOO_LONG]
+            return (
+                True,
+                ConfigManager.SystemConfig.STATUS_MESSAGES[MemorySkipReason.SKIP_TOO_LONG],
+            )
 
         if ContentPatternDetector.is_code_content(trimmed_message):
-            return True, ConfigManager.SystemConfig.STATUS_MESSAGES[MemorySkipReason.SKIP_CODE]
+            return (
+                True,
+                ConfigManager.SystemConfig.STATUS_MESSAGES[MemorySkipReason.SKIP_CODE],
+            )
 
         if ContentPatternDetector.is_structured_data(trimmed_message):
-            return True, ConfigManager.SystemConfig.STATUS_MESSAGES[MemorySkipReason.SKIP_STRUCTURED]
+            return (
+                True,
+                ConfigManager.SystemConfig.STATUS_MESSAGES[MemorySkipReason.SKIP_STRUCTURED],
+            )
 
         if ContentPatternDetector.is_mostly_symbols(trimmed_message):
-            return True, ConfigManager.SystemConfig.STATUS_MESSAGES[MemorySkipReason.SKIP_SYMBOLS]
+            return (
+                True,
+                ConfigManager.SystemConfig.STATUS_MESSAGES[MemorySkipReason.SKIP_SYMBOLS],
+            )
 
         if ContentPatternDetector.is_log_content(trimmed_message):
-            return True, ConfigManager.SystemConfig.STATUS_MESSAGES[MemorySkipReason.SKIP_LOGS]
+            return (
+                True,
+                ConfigManager.SystemConfig.STATUS_MESSAGES[MemorySkipReason.SKIP_LOGS],
+            )
 
         if ContentPatternDetector.is_stack_trace(trimmed_message):
-            return True, ConfigManager.SystemConfig.STATUS_MESSAGES[MemorySkipReason.SKIP_STACKTRACE]
+            return (
+                True,
+                ConfigManager.SystemConfig.STATUS_MESSAGES[MemorySkipReason.SKIP_STACKTRACE],
+            )
 
         if ContentPatternDetector.is_url_dump(trimmed_message):
-            return True, ConfigManager.SystemConfig.STATUS_MESSAGES[MemorySkipReason.SKIP_URL_DUMP]
+            return (
+                True,
+                ConfigManager.SystemConfig.STATUS_MESSAGES[MemorySkipReason.SKIP_URL_DUMP],
+            )
 
         return False, ""
 
@@ -837,7 +832,12 @@ class Filter:
         """Extract user message and determine if memory operations should be skipped."""
         user_message = self._extract_user_message(body.get("messages", []))
         should_skip, skip_reason = (
-            self._should_skip_memory_operations(user_message) if user_message else (True, ConfigManager.SystemConfig.STATUS_MESSAGES[MemorySkipReason.SKIP_EMPTY])
+            self._should_skip_memory_operations(user_message)
+            if user_message
+            else (
+                True,
+                ConfigManager.SystemConfig.STATUS_MESSAGES[MemorySkipReason.SKIP_EMPTY],
+            )
         )
         return user_message, should_skip, skip_reason
 
@@ -845,7 +845,11 @@ class Filter:
         """Get user memories with timeout handling."""
         if timeout is None:
             timeout = ConfigManager.SystemConfig.RETRIEVAL_TIMEOUT
-        return await AsyncOperationManager.execute_with_timeout(asyncio.to_thread(Memories.get_memories_by_user_id, user_id), timeout, "Memory retrieval")
+        return await AsyncOperationManager.execute_with_timeout(
+            asyncio.to_thread(Memories.get_memories_by_user_id, user_id),
+            timeout,
+            "Memory retrieval",
+        )
 
     def _extract_text_content(self, content: Union[str, List[Dict], Dict]) -> str:
         """Extract only text content from various message content formats, ignoring images/files."""
@@ -872,12 +876,65 @@ class Filter:
         return None
 
     async def _compute_memory_similarities(
-        self, user_message: str, user_id: str, user_memories: List, limit_multiplier: float = 1.0
+        self,
+        user_message: str,
+        user_id: str,
+        user_memories: List,
+        limit_multiplier: float = 1.0,
     ) -> Tuple[List[Dict], float, List[Dict]]:
         """Compute similarities between user message and memories, return filtered results, threshold, and all similarities."""
-        return await self._similarity_service.compute_similarities(
-            user_message, user_id, user_memories, limit_multiplier
+        return await self._similarity_service.compute_similarities(user_message, user_id, user_memories, limit_multiplier)
+
+    def _log_retrieved_memories(self, memories: List[Dict[str, Any]], context_type: str = "semantic") -> None:
+        """Log retrieved memories with consistent formatting for both semantic retrieval and consolidation."""
+        if not memories:
+            return
+
+        context_label = (
+            "📊 Consolidation candidate memories ranked by semantic similarity:"
+            if context_type == "consolidation"
+            else "📊 Memories ranked by semantic similarity:"
         )
+        logger.info(context_label)
+
+        for rank, memory in enumerate(memories, 1):
+            content_preview = memory["content"][:100] + "..." if len(memory["content"]) > 100 else memory["content"]
+            logger.info(f"  {rank}. Score: {memory['relevance']:.4f} | {content_preview}")
+
+    def _get_consolidation_threshold(self) -> float:
+        """Calculate the consolidation threshold using relaxed multiplier."""
+        return self.valves.semantic_retrieval_threshold * ConfigManager.SystemConfig.RELAXED_RETRIEVAL_MULTIPLIER
+
+    def _build_operation_details(
+        self,
+        created_count: int,
+        updated_count: int,
+        deleted_count: int,
+        format_style: str = "past",
+    ) -> List[str]:
+        """Build operation details list with consistent formatting."""
+        operation_details = []
+
+        if format_style == "past":
+            if created_count > 0:
+                operation_details.append(f"Created {created_count}")
+            if updated_count > 0:
+                operation_details.append(f"Updated {updated_count}")
+            if deleted_count > 0:
+                operation_details.append(f"Deleted {deleted_count}")
+        else:
+            if created_count > 0:
+                operation_details.append(f"{created_count} CREATE")
+            if updated_count > 0:
+                operation_details.append(f"{updated_count} UPDATE")
+            if deleted_count > 0:
+                operation_details.append(f"{deleted_count} DELETE")
+
+        return operation_details
+
+    def _generate_cache_key(self, user_id: str, user_message: str) -> str:
+        """Generate cache key for user message."""
+        return f"{user_id}:{hashlib.sha256(user_message.encode('utf-8')).hexdigest()[:16]}"
 
     def format_current_datetime(self) -> str:
         try:
@@ -896,21 +953,26 @@ class Filter:
         try:
             result = emitter(payload)
             if asyncio.iscoroutine(result):
-                await AsyncOperationManager.execute_with_timeout(result, ConfigManager.SystemConfig.STATUS_EMIT_TIMEOUT, "Status emit")
-            logger.info(f"📌 Status emitted: {description}")
+                await AsyncOperationManager.execute_with_timeout(
+                    result,
+                    ConfigManager.SystemConfig.STATUS_EMIT_TIMEOUT,
+                    "Status emit",
+                )
         except Exception as e:
-            logger.warning(f"❌ Status emit failed for '{description[:50]}': {e}")
+            logger.warning(f"⚠️ Status emit failed: {str(e)}")
 
     async def _retrieve_relevant_memories(self, user_message: str, user_id: str, user_memories: List = None) -> Dict[str, Any]:
         """Retrieve memories for injection using simplified similarity computation."""
         if user_memories is None:
             user_memories = await AsyncOperationManager.execute_with_timeout(
-                asyncio.to_thread(Memories.get_memories_by_user_id, user_id), ConfigManager.SystemConfig.RETRIEVAL_TIMEOUT, "Memory retrieval"
+                asyncio.to_thread(Memories.get_memories_by_user_id, user_id),
+                ConfigManager.SystemConfig.RETRIEVAL_TIMEOUT,
+                "Memory retrieval",
             )
 
         if not user_memories:
             logger.info("📭 No memories found for user")
-            return {"memories": [], "dynamic_threshold": None}
+            return {"memories": [], "threshold": None}
 
         logger.info(f"🔍 Found {len(user_memories)} total memories for analysis")
 
@@ -918,42 +980,43 @@ class Filter:
 
         logger.info(f"🎯 Selected {len(memories)} injection memories (threshold: {threshold:.3f})")
 
-        if memories:
-            logger.info("📊 Memories ranked by semantic similarity:")
-            for rank, memory in enumerate(memories, 1):
-                content_preview = memory["content"][:120] + "..." if len(memory["content"]) > 120 else memory["content"]
-                logger.info(f"  {rank}. Score: {memory['relevance']:.4f} | Content: {content_preview}")
+        self._log_retrieved_memories(memories, "semantic")
 
-        return {"memories": memories, "dynamic_threshold": threshold, "all_similarities": all_similarities}
+        return {
+            "memories": memories,
+            "threshold": threshold,
+            "all_similarities": all_similarities,
+        }
 
     async def _add_memory_context(
-        self, body: Dict[str, Any], memories: List[Dict[str, Any]] = None, user_id: str = None, emitter: Optional[Callable] = None
+        self,
+        body: Dict[str, Any],
+        memories: List[Dict[str, Any]] = None,
+        user_id: str = None,
+        emitter: Optional[Callable] = None,
     ) -> None:
         """Add memory context to request body with simplified logic."""
         if not body or "messages" not in body or not body["messages"]:
-            logger.info("❌ Invalid body or no messages found")
+            logger.warning("⚠️ Invalid request body or no messages found")
             return
 
         content_parts = [f"Current Date/Time: {self.format_current_datetime()}"]
 
         if memories and user_id:
-            memory_count = len(memories)
-            fact_word = "fact" if memory_count == 1 else f"{memory_count} facts"
-            memory_header = f"BACKGROUND: You naturally know {'this' if memory_count == 1 else 'these'} {fact_word}. Never mention {'its' if memory_count == 1 else 'their'} source."
-
-            formatted_memories = []
-            for memory in memories:
-                clean_content = " ".join(memory["content"].replace("\n", " ").replace("\r", " ").split())
-                formatted_memories.append(f"- {clean_content}")
-            content_parts.append(f"{memory_header}\n{chr(10).join(formatted_memories)}")
+            memory_context_block = MemoryTransformer.to_context_format(memories)
+            content_parts.append(memory_context_block)
 
             if emitter:
+                memory_count = len(memories)
                 description = f"🧠 Retrieved {memory_count} {'Memory' if memory_count == 1 else 'Memories'} for Context"
                 await self._emit_status(emitter, description, done=True)
 
         memory_context = "\n\n".join(content_parts)
 
-        system_index = next((i for i, msg in enumerate(body["messages"]) if msg.get("role") == "system"), None)
+        system_index = next(
+            (i for i, msg in enumerate(body["messages"]) if msg.get("role") == "system"),
+            None,
+        )
 
         if system_index is not None:
             body["messages"][system_index]["content"] = f"{body['messages'][system_index].get('content', '')}\n\n{memory_context}"
@@ -961,18 +1024,30 @@ class Filter:
             body["messages"].insert(0, {"role": "system", "content": memory_context})
 
     async def _collect_consolidation_candidates(
-        self, user_message: str, user_id: str, cached_similarities: Optional[List[Dict[str, Any]]] = None
+        self,
+        user_message: str,
+        user_id: str,
+        cached_similarities: Optional[List[Dict[str, Any]]] = None,
     ) -> List[Dict[str, Any]]:
         """Collect candidate memories for consolidation analysis using cached or computed similarities."""
         if cached_similarities is not None:
             logger.info(f"🚀 Reusing cached similarities for {len(cached_similarities)} memories")
-            similarity_scores = [mem["relevance"] for mem in cached_similarities]
-            consolidation_threshold = self._similarity_service._calculate_dynamic_threshold(similarity_scores, for_consolidation=True)
+            consolidation_threshold = self._get_consolidation_threshold()
             candidates = [mem for mem in cached_similarities if mem["relevance"] >= consolidation_threshold]
             logger.info(f"🎯 Found {len(candidates)} candidate memories for consolidation (threshold: {consolidation_threshold:.3f})")
+
+            self._log_retrieved_memories(candidates, "consolidation")
+
             return candidates
 
-        user_memories = await self._get_user_memories(user_id, ConfigManager.SystemConfig.CONSOLIDATION_TIMEOUT)
+        memory_cache_key = f"memories_{user_id}"
+        user_memories = await self._memory_cache.get(memory_cache_key)
+
+        if user_memories is None:
+            user_memories = await self._get_user_memories(user_id, ConfigManager.SystemConfig.CONSOLIDATION_TIMEOUT)
+            await self._memory_cache.put(memory_cache_key, user_memories)
+        else:
+            logger.info(f"🚀 Reusing cached user memories for consolidation: {len(user_memories)} memories")
 
         if not user_memories:
             logger.info("📭 No existing memories found for user")
@@ -980,13 +1055,10 @@ class Filter:
 
         logger.info(f"🗃️ Found {len(user_memories)} existing memories for consolidation analysis")
 
-        _, _, all_similarities = await self._compute_memory_similarities(
-            user_message, user_id, user_memories, limit_multiplier=1.0
-        )
-        
+        _, _, all_similarities = await self._compute_memory_similarities(user_message, user_id, user_memories, limit_multiplier=1.0)
+
         if all_similarities:
-            similarity_scores = [mem["relevance"] for mem in all_similarities]
-            consolidation_threshold = self._similarity_service._calculate_dynamic_threshold(similarity_scores, for_consolidation=True)
+            consolidation_threshold = self._get_consolidation_threshold()
             candidates = [mem for mem in all_similarities if mem["relevance"] >= consolidation_threshold]
             limit = int(ConfigManager.SystemConfig.DEFAULT_MAX_MEMORIES_RETURNED * ConfigManager.SystemConfig.RETRIEVAL_MULTIPLIER)
             candidates = candidates[:limit]
@@ -994,6 +1066,9 @@ class Filter:
             candidates = []
 
         logger.info(f"🎯 Found {len(candidates)} candidate memories for consolidation (threshold: {consolidation_threshold if all_similarities else 'N/A'})")
+
+        self._log_retrieved_memories(candidates, "consolidation")
+
         return candidates
 
     async def _generate_consolidation_plan(self, user_message: str, candidate_memories: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -1018,7 +1093,11 @@ class Filter:
         )
 
         response = await asyncio.wait_for(
-            self._query_llm(system_prompt, "Analyze the memories and generate a consolidation plan.", response_model=ConsolidationResponse),
+            self._query_llm(
+                system_prompt,
+                "Analyze the memories and generate a consolidation plan.",
+                response_model=ConsolidationResponse,
+            ),
             timeout=ConfigManager.SystemConfig.CONSOLIDATION_TIMEOUT,
         )
 
@@ -1042,13 +1121,7 @@ class Filter:
             update_count = sum(1 for op in valid_operations if op.get("operation") == "UPDATE")
             delete_count = sum(1 for op in valid_operations if op.get("operation") == "DELETE")
 
-            operation_details = []
-            if create_count > 0:
-                operation_details.append(f"{create_count} CREATE")
-            if update_count > 0:
-                operation_details.append(f"{update_count} UPDATE")
-            if delete_count > 0:
-                operation_details.append(f"{delete_count} DELETE")
+            operation_details = self._build_operation_details(create_count, update_count, delete_count, "present")
 
             logger.info(f"🎯 Planned {len(valid_operations)} memory optimization operations: {', '.join(operation_details)}")
         else:
@@ -1056,13 +1129,20 @@ class Filter:
 
         return valid_operations
 
-    async def _execute_memory_operations(self, operations: List[Dict[str, Any]], user_id: str, emitter: Optional[Callable] = None) -> None:
+    async def _execute_memory_operations(
+        self,
+        operations: List[Dict[str, Any]],
+        user_id: str,
+        emitter: Optional[Callable] = None,
+    ) -> None:
         """Execute consolidation operations with simplified tracking."""
         if not operations:
             return
 
         user = await AsyncOperationManager.execute_with_timeout(
-            asyncio.to_thread(Users.get_user_by_id, user_id), ConfigManager.SystemConfig.TIMEOUT_USER_LOOKUP, "User lookup"
+            asyncio.to_thread(Users.get_user_by_id, user_id),
+            ConfigManager.SystemConfig.TIMEOUT_USER_LOOKUP,
+            "User lookup",
         )
 
         if not user:
@@ -1093,27 +1173,28 @@ class Filter:
 
         if total_executed > 0:
             if emitter:
-                operation_details = []
-                if created_count > 0:
-                    operation_details.append(f"Created {created_count}")
-                if updated_count > 0:
-                    operation_details.append(f"Updated {updated_count}")
-                if deleted_count > 0:
-                    operation_details.append(f"Deleted {deleted_count}")
+                operation_details = self._build_operation_details(created_count, updated_count, deleted_count, "past")
 
                 description = f"🔄 Memory Operations: {', '.join(operation_details)}"
                 if failed_count > 0:
                     description += f" ({failed_count} Failed)"
                 await self._emit_status(emitter, description, done=True)
 
-            await self._clear_user_cache(user_id)
-            await self._warm_user_cache(user_id)
+            await self._refresh_user_cache(user_id)
         else:
             if emitter and failed_count > 0:
-                await self._emit_status(emitter, f"⚠️ Memory Operations: All {failed_count} operations failed", done=True)
+                await self._emit_status(
+                    emitter,
+                    f"⚠️ Memory Operations: All {failed_count} operations failed",
+                    done=True,
+                )
 
     async def _run_consolidation_pipeline(
-        self, user_message: str, user_id: str, emitter: Optional[Callable] = None, cached_similarities: Optional[List[Dict[str, Any]]] = None
+        self,
+        user_message: str,
+        user_id: str,
+        emitter: Optional[Callable] = None,
+        cached_similarities: Optional[List[Dict[str, Any]]] = None,
     ) -> None:
         """Complete consolidation pipeline with simplified flow."""
         try:
@@ -1137,10 +1218,15 @@ class Filter:
                 try:
                     await self._emit_status(emitter, "⚠️ Memory Optimization Failed", done=False)
                 except Exception as emit_error:
-                    logger.warning(f"❌ Failed to emit consolidation error status: {emit_error}")
+                    logger.warning(f"⚠️ Failed to emit error status: {str(emit_error)}")
             raise
 
-    async def inlet(self, body: Dict[str, Any], __event_emitter__: Optional[Callable] = None, __user__: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    async def inlet(
+        self,
+        body: Dict[str, Any],
+        __event_emitter__: Optional[Callable] = None,
+        __user__: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
         """Simplified inlet processing for memory retrieval and injection."""
         if not (body and __user__):
             return body
@@ -1159,17 +1245,17 @@ class Filter:
             user_memories = await self._get_user_memories(user_id)
 
             if user_memories:
+                memory_cache_key = f"memories_{user_id}"
+                await self._memory_cache.put(memory_cache_key, user_memories)
+
                 retrieval_result = await self._retrieve_relevant_memories(user_message, user_id, user_memories)
                 memories = retrieval_result.get("memories", [])
-                threshold = retrieval_result.get("dynamic_threshold")
+                threshold = retrieval_result.get("threshold")
                 all_similarities = retrieval_result.get("all_similarities", [])
 
                 if all_similarities:
-                    cache_key = f"{user_id}:{hashlib.sha256(user_message.encode('utf-8')).hexdigest()[:16]}"
-                    self._retrieval_cache[cache_key] = all_similarities
-
-                    if len(self._retrieval_cache) > 100:
-                        self._retrieval_cache.popitem(last=False)
+                    cache_key = self._generate_cache_key(user_id, user_message)
+                    await self._retrieval_cache.put(cache_key, all_similarities)
             else:
                 memories = []
                 threshold = None
@@ -1182,7 +1268,12 @@ class Filter:
 
         return body
 
-    async def outlet(self, body: dict, __event_emitter__: Optional[Callable] = None, __user__: Optional[dict] = None) -> dict:
+    async def outlet(
+        self,
+        body: dict,
+        __event_emitter__: Optional[Callable] = None,
+        __user__: Optional[dict] = None,
+    ) -> dict:
         """Simplified outlet processing for background memory consolidation."""
         if not (body and __user__):
             return body
@@ -1196,18 +1287,12 @@ class Filter:
                 await self._emit_status(__event_emitter__, skip_reason, done=True)
             return body
 
-        cache_key = f"{user_id}:{hashlib.sha256(user_message.encode('utf-8')).hexdigest()[:16]}"
-        cached_similarities = self._retrieval_cache.get(cache_key)
-
-        if cached_similarities:
-            self._retrieval_cache.move_to_end(cache_key)
+        cache_key = self._generate_cache_key(user_id, user_message)
+        cached_similarities = await self._retrieval_cache.get(cache_key)
 
         task = asyncio.create_task(self._run_consolidation_pipeline(user_message, user_id, __event_emitter__, cached_similarities))
         self._background_tasks.add(task)
         task.add_done_callback(lambda t: self._background_tasks.discard(t))
-
-        if cached_similarities:
-            self._retrieval_cache.pop(cache_key, None)
 
         return body
 
@@ -1222,21 +1307,53 @@ class Filter:
         if self._aiohttp_session and not self._aiohttp_session.closed:
             await self._aiohttp_session.close()
 
+        await self._retrieval_cache.clear()
+        await self._memory_cache.clear()
+
+        async with self._cache_lock:
+            for user_cache in self._embedding_cache.values():
+                await user_cache.clear()
+            self._embedding_cache.clear()
+
     async def _clear_user_cache(self, user_id: str) -> None:
         """Invalidate all cache entries for a specific user."""
-        def _clear_cache():
-            with self._cache_lock:
-                if user_id in self._embedding_cache:
-                    user_cache = self._embedding_cache[user_id]
-                    return user_cache
-                return None
+        async with self._cache_lock:
+            if user_id in self._embedding_cache:
+                user_cache = self._embedding_cache[user_id]
+                await user_cache.clear()
+                logger.info(f"🧹 Embedding cache cleared for user {user_id}")
 
-        loop = asyncio.get_event_loop()
-        user_cache = await loop.run_in_executor(None, _clear_cache)
-        
-        if user_cache:
-            await user_cache.clear()
-            logger.info(f"🧹 Embedding cache cleared for user {user_id}")
+    async def _refresh_user_cache(self, user_id: str) -> None:
+        """Efficiently refresh user cache by clearing and warming in one operation."""
+        start_time = datetime.now()
+        try:
+            user_memories = await self._get_user_memories(user_id)
+
+            if not user_memories:
+                logger.info(f"🔄 No memories to refresh cache for user {user_id}")
+                memory_cache_key = f"memories_{user_id}"
+                await self._memory_cache.put(memory_cache_key, [])
+                return
+
+            await self._clear_user_cache(user_id)
+
+            memory_cache_key = f"memories_{user_id}"
+            await self._memory_cache.put(memory_cache_key, user_memories)
+
+            memory_contents = [
+                memory.content for memory in user_memories if memory.content and len(memory.content.strip()) >= ConfigManager.SkipThresholds.MIN_QUERY_LENGTH
+            ]
+
+            if memory_contents:
+                await self._generate_embeddings_batch(memory_contents, user_id)
+                duration = (datetime.now() - start_time).total_seconds()
+                logger.info(f"🔄 Cache refreshed with {len(memory_contents)} embeddings for user {user_id} in {duration:.2f}s")
+            else:
+                logger.info(f"🔄 No valid memory content to refresh cache for user {user_id}")
+
+        except Exception as e:
+            duration = (datetime.now() - start_time).total_seconds()
+            logger.warning(f"⚠️ Failed to refresh cache for user {user_id} after {duration:.2f}s: {str(e)}")
 
     async def _warm_user_cache(self, user_id: str) -> None:
         """Pre-populate cache with embeddings for all user memories."""
@@ -1249,8 +1366,7 @@ class Filter:
                 return
 
             memory_contents = [
-                memory.content for memory in user_memories 
-                if memory.content and len(memory.content.strip()) >= ConfigManager.SkipThresholds.MIN_QUERY_LENGTH
+                memory.content for memory in user_memories if memory.content and len(memory.content.strip()) >= ConfigManager.SkipThresholds.MIN_QUERY_LENGTH
             ]
 
             if memory_contents:
@@ -1269,7 +1385,8 @@ class Filter:
         try:
             if operation.operation == MemoryOperationType.CREATE:
                 await AsyncOperationManager.execute_db_operation(
-                    lambda: Memories.insert_new_memory(user.id, operation.content.strip()), context="Memory creation"
+                    lambda: Memories.insert_new_memory(user.id, operation.content.strip()),
+                    context="Memory creation",
                 )
                 content_preview = operation.content[:80] + "..." if len(operation.content) > 80 else operation.content
                 logger.info(f"✅ Created memory: {content_preview}")
@@ -1277,7 +1394,8 @@ class Filter:
 
             elif operation.operation == MemoryOperationType.UPDATE and operation.id:
                 await AsyncOperationManager.execute_db_operation(
-                    lambda: Memories.update_memory_by_id_and_user_id(operation.id, user.id, operation.content.strip()), context="Memory update"
+                    lambda: Memories.update_memory_by_id_and_user_id(operation.id, user.id, operation.content.strip()),
+                    context="Memory update",
                 )
                 content_preview = operation.content[:80] + "..." if len(operation.content) > 80 else operation.content
                 logger.info(f"🔄 Updated memory {operation.id}: {content_preview}")
@@ -1285,7 +1403,8 @@ class Filter:
 
             elif operation.operation == MemoryOperationType.DELETE and operation.id:
                 await AsyncOperationManager.execute_db_operation(
-                    lambda: Memories.delete_memory_by_id_and_user_id(operation.id, user.id), context="Memory deletion"
+                    lambda: Memories.delete_memory_by_id_and_user_id(operation.id, user.id),
+                    context="Memory deletion",
                 )
                 logger.info(f"🗑️ Deleted memory {operation.id}")
                 return MemoryOperationType.DELETE.value
@@ -1298,7 +1417,12 @@ class Filter:
         except Exception as e:
             raise MemorySystemError(f"Database operation failed: {str(e)}", "Memory operations")
 
-    async def _query_llm(self, system_prompt: str, user_prompt: str, response_model: Optional[BaseModel] = None) -> Union[str, BaseModel]:
+    async def _query_llm(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        response_model: Optional[BaseModel] = None,
+    ) -> Union[str, BaseModel]:
         """Query the OpenAI API or compatible endpoints with Pydantic model parsing."""
         if not self.valves.api_key or not self.valves.api_key.strip():
             raise MemorySystemError("API key is required but not provided.")
