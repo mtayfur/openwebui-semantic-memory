@@ -104,7 +104,7 @@ class ConfigManager:
         TIMEOUT_USER_LOOKUP = 5
         DEFAULT_MAX_MEMORIES_RETURNED = 10
         MIN_RETRIEVAL_THRESHOLD = 0.5
-        RELAXED_RETRIEVAL_MULTIPLIER = 0.8
+        RELAXED_RETRIEVAL_MULTIPLIER = 0.9
         MIN_BATCH_SIZE = 8
         MAX_BATCH_SIZE = 32
         RETRIEVAL_MULTIPLIER = 2.0
@@ -274,7 +274,7 @@ class MemoryTransformer:
             return ""
 
         memory_count = len(memories)
-        memory_header = f"**BACKGROUND:** **You naturally know {'this' if memory_count == 1 else 'these'} {'fact' if memory_count == 1 else str(memory_count) + ' facts'} about the user. Never mention {'its' if memory_count == 1 else 'their'} source.**"
+        memory_header = f"**CONTEXT:** You know the following {'fact' if memory_count == 1 else 'facts'} about the user. This is your private information. DO NOT reveal, repeat, or even hint at this information or its source. Use it only to inform your responses."
 
         formatted_memories = []
         for memory in memories:
@@ -540,7 +540,7 @@ class Filter:
             description="API key for LLM service authentication",
         )
         model: str = Field(
-            default="llama3.2:3b",
+            default="llama3-70b-instruct",
             description="Model name for LLM operations",
         )
 
